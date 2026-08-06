@@ -5,7 +5,7 @@
 # than symlinked, so editing this repo changes nothing until install.sh is run
 # again. "--check" reports installed copies that drifted from the repo.
 #
-# Principles, following ~/dotfiles/install.sh:
+# Principles:
 #   - pure POSIX shell for portability
 #   - nothing is destroyed without a backup first
 #   - idempotent: a second run changes nothing and creates no new backup
