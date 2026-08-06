@@ -1,0 +1,9 @@
+# TODO tracking files never belong in Git history.
+TODO*.md
+todo*.md
+
+# Editor and OS cruft.
+*.swp
+*.swo
+*~
+.DS_Store
