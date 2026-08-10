@@ -7,6 +7,17 @@ trailing colon, investigate the request and create a
 structured TODO markdown file with an appropriate name, such as
 `TODO_AUDIO_EDITING.md`.
 
+Planning is read-only: write the TODO file in the worktree the user is already
+in (`main/` or `develop/`) and create no worktree of your own. In a faur-git
+workspace, record the worktree slug that the `execute:` step should create, as
+the first line under the title — see the `worktree-workflow` skill:
+
+```markdown
+# TODO: audio editing
+
+Worktree: `audio-editing`
+```
+
 Keep the TODO file succinct and practical. It should include everything needed
 for another AI agent to complete the work one item at a time.
 

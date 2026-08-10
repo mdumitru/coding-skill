@@ -74,3 +74,7 @@ active session's rules until `./install.sh` is run.
 
 `TODO*.md` / `todo*.md` are gitignored on purpose — the `plan:` workflow writes
 TODO files and they must never enter Git history.
+
+This repo is a plain checkout, not a `faur-git` workspace, so the
+`worktree-workflow` rule ("one worktree per task") does not apply here — work in
+place. It still applies to the repos those skills are installed into.
