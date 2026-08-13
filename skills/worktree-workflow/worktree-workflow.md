@@ -100,7 +100,8 @@ TODO files are never committed, in either worktree.
 
 Commit per item (baseline commit conventions), then **stop**. Do not push, do
 not open a PR, do not merge into `main`, and do not remove the worktree — those
-are the user's calls. Report in a couple of lines:
+are the user's calls. When the user does ask for a PR, follow the `pr-workflow`
+skill, from inside the task worktree. Report in a couple of lines:
 
 ```
 worktree: ../audio-editing (branch audio-editing), 3 commits, not pushed

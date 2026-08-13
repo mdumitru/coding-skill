@@ -21,3 +21,10 @@ subcommands before running any of them.
 Exceptions: read-only tasks (including `plan:`), repos that are not faur
 workspaces, when I am already inside a task worktree, and when I say otherwise.
 Never push, merge, or remove a worktree unless I ask.
+
+## Pull requests
+
+Only when I explicitly ask for a PR: follow the `pr-workflow` skill — fetch the
+base branch, rebase if the branch is behind, stop and warn me on conflicts,
+push, then open the PR with `gh`. Never push or open a PR unprompted, and never
+put attribution or "generated with" footers in a PR.
