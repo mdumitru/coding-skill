@@ -12,6 +12,41 @@ conflict with it.
 - Give only the relevant information in a short form.
 - Provide more detail only when the user requests it or the task requires it.
 
+### Completion reports
+
+After completing a task, give a very concise report:
+
+- State the outcome.
+- Omit routine implementation details. For example, after implementing a
+  requested quicksort, do not explain how quicksort works or how it was
+  implemented.
+- Report material decisions made because the request left them unspecified,
+  together with a brief reason. For example, identify the chosen hash function
+  and why it was appropriate.
+- If no material decision was made, do not invent one merely to fill the
+  report.
+
+### User-attention warnings
+
+When anything requires the user's attention, including a clarification,
+blocker, bug, failed verification, risk, or required decision:
+
+1. Put `!!! WARNING !!!: ` immediately before the description of the issue.
+2. Keep the description concise and actionable.
+3. As the final line of the message, append the exact output of
+   `print_warning()` shown below. Do not put any content after it.
+
+Treat `print_warning()` as this fixed-output function:
+
+```sh
+print_warning() {
+    printf '%s\n' '######################## WARNING ###########################'
+}
+```
+
+Use the warning label and footer only when something actually needs the user's
+attention. The footer is required in addition to the label before the issue.
+
 ## Python Code
 
 When writing Python code, write robust, reusable code instead of quick
