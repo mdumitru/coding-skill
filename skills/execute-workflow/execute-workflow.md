@@ -7,12 +7,12 @@ trailing colon, followed by a TODO file:
 
 - In a faur-git workspace, **create the task worktree before touching any
   code** (`faur worktree add <slug>`, using the slug the TODO file records) and
-  do all work and all commits there. The TODO file stays where it is, in `main/`
-  or `develop/`. See the `worktree-workflow` skill.
+  do all work and all commits there. The TODO file stays where it is, in the
+  launch worktree. See the `worktree-workflow` skill.
 - Read the TODO file and solve the items one by one.
 - After completing an item, mark it complete in the TODO file.
 - Commit the changes after each completed item (see baseline commit conventions).
-  Commits belong to the task worktree, never to `main`/`develop`.
+  Commits belong to the task worktree, never to the launch worktree.
 
 If an item is ambiguous, something is unclear, or there are multiple viable
 solutions with different trade-offs:

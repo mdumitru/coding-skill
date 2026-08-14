@@ -2,16 +2,16 @@
 
 Shared between Codex and Claude.
 
-The user works in a `faur-git` workspace and is **always sitting in the
-integration worktree** — `main/` or `develop/`. That worktree is for reading,
-planning, and integrating only. Every task the user hands over gets its own
-worktree, created with the `faur` CLI.
+The user works in a `faur-git` workspace and launches the agent from an
+integration worktree, usually `main/` or `develop/` but not necessarily. That
+launch worktree is for reading, planning, and integrating only. Every task the
+user hands over gets its own worktree, created with the `faur` CLI.
 
 ```
 <workspace>/
 ├── .bare/        # the canonical git repo
 ├── _shared/      # .env, secrets, local config — symlinked into every worktree
-├── main/         # where the user is; never modified by a task
+├── main/         # usual launch worktree; never modified by a task
 └── <slug>/       # one worktree per task, created by `faur worktree add`
 ```
 
@@ -26,9 +26,10 @@ Do **not** create one when:
   investigations, and the `plan:` workflow itself.
 - The repo is not a faur workspace, or `faur` is not installed. Check with
   `faur worktrees`; if it errors, work in place and say so in one line.
-- The current worktree is already a task worktree (its directory name is
-  neither `main` nor `develop`). Never nest — continue in the current one.
-- The user explicitly says to work in `main`/`develop` or in a named worktree.
+- The current worktree is already the dedicated worktree for this task. Never
+  nest — continue in the current one.
+- The user explicitly says to work in the launch worktree or another named
+  worktree.
 
 ## 2. Name the worktree
 
@@ -45,11 +46,16 @@ The slug is the branch name and the directory name.
 
 ## 3. Create it
 
-From `main/` (or `develop/`):
+From the launch worktree:
 
 ```sh
 faur worktree add <slug> --base <current-branch>
 ```
+
+Before creating it, record the absolute path and branch of the worktree from
+which the agent was launched. This is the default integration destination for
+a later `finish` request; do not assume it is `main`. After creation, record
+the task branch's starting commit so its eventual commit range is exact.
 
 This branches from current remote refs (it fetches first), mirrors `_shared/`
 in as symlinks, then runs `uv venv`, `uv sync --extra dev`, and installs
@@ -79,8 +85,8 @@ Treat `<workspace>/<slug>` as the working root for the rest of the task:
 ## 5. Interaction with `plan:` and `execute:`
 
 **`plan:` creates no worktree.** Planning is read-only. Write the TODO file in
-`main/` and record the slug the execute step should use, as the first line
-under the title:
+the launch worktree and record the slug the execute step should use, as the
+first line under the title:
 
 ```markdown
 # TODO: audio editing
@@ -89,26 +95,61 @@ Worktree: `audio-editing`
 ```
 
 **`execute:` creates the worktree first**, before touching any code, then works
-inside it. **The TODO file stays in `main/`** — read it and tick items off at
-`<workspace>/main/TODO_*.md` while the code changes happen in the worktree.
-This keeps the TODO out of the worktree, which keeps `faur worktree remove`
-safe, and keeps it where the user is.
+inside it. **The TODO file stays in the launch worktree** — read and tick it off
+at its recorded absolute path while the code changes happen in the task
+worktree. This keeps the TODO out of the task worktree, which keeps
+`faur worktree remove` safe, and keeps it where the user is.
 
 TODO files are never committed, in either worktree.
 
-## 6. Finish and report
+## 6. Complete the task and report
 
 Commit per item (baseline commit conventions), then **stop**. Do not push, do
-not open a PR, do not merge into `main`, and do not remove the worktree — those
-are the user's calls. When the user does ask for a PR, follow the `pr-workflow`
-skill, from inside the task worktree. Report in a couple of lines:
+not open a PR, do not integrate the commits, and do not remove the worktree.
+The user must request integration explicitly in a **new message after task
+completion**. A `finish` phrase in the original task request does not authorize
+integration or removal. When the user does ask for a PR, follow the
+`pr-workflow` skill from inside the task worktree. Report in a couple of lines:
 
 ```
 worktree: ../audio-editing (branch audio-editing), 3 commits, not pushed
-remove when merged: faur worktree remove audio-editing
+send `finish` to integrate here, or `finish in <branch>` elsewhere
 ```
 
-## 7. Managing worktrees on request
+## 7. Handle an explicit finish request
+
+Only run this workflow when, after the completed-task report, the user sends a
+new message explicitly saying `finish` or `finish in <branch>`.
+
+- `finish` targets the recorded launch worktree and its recorded branch.
+- `finish in <branch>` targets the existing worktree that has `<branch>`
+  checked out. Do not silently switch another worktree to that branch. If no
+  worktree has it checked out, stop, warn the user clearly, and ask where to
+  integrate.
+
+Then:
+
+1. Inspect both worktrees and identify the commits after the task branch's
+   recorded starting commit, ordered oldest to newest. Show that exact list in
+   the progress update and verify it contains only this task's commits.
+2. Require both worktrees to be clean and verify that the target is still on
+   the intended branch. If anything is dirty, ambiguous, or unexpectedly
+   diverged, stop before changing anything and warn the user clearly.
+3. In the target worktree, cherry-pick those commits oldest to newest. If any
+   cherry-pick conflicts or fails, stop immediately, preserve Git's state for
+   diagnosis, warn the user clearly, and do not remove the task worktree.
+4. After every cherry-pick succeeds, verify the resulting history and run
+   `faur worktree remove <slug>`. If removal fails, warn the user clearly and
+   leave the branch intact.
+5. Report the integrated commits and removal result, then ask a direct yes/no
+   question: whether to run `git branch -D <branch>`. Never delete the branch
+   before the user answers yes in a later message.
+
+Do not push during this workflow. Treat any unexpected state, partial success,
+conflict, skipped/empty cherry-pick, or command failure as something requiring
+an immediate, prominent warning and the user's attention.
+
+## 8. Managing worktrees on request
 
 Only when asked:
 

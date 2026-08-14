@@ -8,9 +8,10 @@ structured TODO markdown file with an appropriate name, such as
 `TODO_AUDIO_EDITING.md`.
 
 Planning is read-only: write the TODO file in the worktree the user is already
-in (`main/` or `develop/`) and create no worktree of your own. In a faur-git
-workspace, record the worktree slug that the `execute:` step should create, as
-the first line under the title — see the `worktree-workflow` skill:
+in (usually `main/` or `develop/`, but not necessarily) and create no worktree
+of your own. In a faur-git workspace, record the worktree slug that the
+`execute:` step should create, as the first line under the title — see the
+`worktree-workflow` skill:
 
 ```markdown
 # TODO: audio editing

@@ -9,7 +9,7 @@ Skills here:
 | Skill | Trigger |
 | --- | --- |
 | `agent-baseline` | always on: succinct replies, robust typed Python, commit style |
-| `worktree-workflow` | any task that modifies files in a [faur-git](https://github.com/faur-ai/faur-git) workspace: one worktree per task |
+| `worktree-workflow` | isolate changes in a [faur-git](https://github.com/faur-ai/faur-git) task worktree, then explicitly `finish` them into an integration worktree |
 | `plan-workflow` | a message containing the keyword `plan:` |
 | `execute-workflow` | a message containing the keyword `execute:` |
 

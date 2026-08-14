@@ -7,12 +7,13 @@ keywords (including their trailing colons) trigger the `plan-workflow` and
 
 ## Worktrees
 
-I always work from the integration worktree of a `faur-git` workspace
-(`.bare/` + `_shared/` + `main/`, managed by the `faur` CLI). `main/` and
-`develop/` are for reading and integrating, not for doing work.
+I work from an integration worktree of a `faur-git` workspace (`.bare/` +
+`_shared/` + worktrees, managed by the `faur` CLI), usually `main/` or
+`develop/` but not necessarily. The launch worktree is for reading and
+integrating, not for doing task work.
 
 Before modifying any tracked file, create a worktree for the task and work
-there: `faur worktree add <slug>` from `main/`, then use
+there: `faur worktree add <slug>` from the launch worktree, then use
 `<workspace>/<slug>/` for every edit, command, and commit. One task, one
 worktree, however small the change. Read the `worktree-workflow` skill for the
 naming rules, the `plan:`/`execute:` interaction, and the other `faur`
@@ -20,7 +21,13 @@ subcommands before running any of them.
 
 Exceptions: read-only tasks (including `plan:`), repos that are not faur
 workspaces, when I am already inside a task worktree, and when I say otherwise.
-Never push, merge, or remove a worktree unless I ask.
+Never push, merge, or remove a worktree unless I ask. After a task is complete,
+only a new message explicitly saying `finish` or `finish in <branch>` authorizes
+the integration-and-removal workflow documented by the `worktree-workflow`
+skill. Afterward, ask before deleting the task branch.
+
+At any point, warn me clearly about conflicts, failures, ambiguous state, or
+anything else that did not go smoothly or requires my attention.
 
 ## Pull requests
 
