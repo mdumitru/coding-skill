@@ -7,10 +7,10 @@ keywords (including their trailing colons) trigger the `plan-workflow` and
 
 ## Worktrees
 
-I work from an integration worktree of a `faur-git` workspace (`.bare/` +
-`_shared/` + worktrees, managed by the `faur` CLI), usually `main/` or
-`develop/` but not necessarily. The launch worktree is for reading and
-integrating, not for doing task work.
+I work in a `faur-git` workspace (`.bare/` + `_shared/` + worktrees, managed
+by the `faur` CLI). The agent may be launched from any worktree, including an
+existing task worktree. Its location never authorizes doing a new task there:
+the launch worktree is for reading and later integration only.
 
 Before modifying any tracked file, create a worktree for the task and work
 there: `faur worktree add <slug>` from the launch worktree, then use
@@ -20,7 +20,8 @@ naming rules, the `plan:`/`execute:` interaction, and the other `faur`
 subcommands before running any of them.
 
 Exceptions: read-only tasks (including `plan:`), repos that are not faur
-workspaces, when I am already inside a task worktree, and when I say otherwise.
+workspaces, and an explicit instruction to work "here" or in a named existing
+worktree. Being launched from a non-main or task worktree is not an exception.
 Never push, merge, or remove a worktree unless I ask. After a task is complete,
 only a new message explicitly saying `finish` or `finish in <branch>` authorizes
 the integration-and-removal workflow documented by the `worktree-workflow`

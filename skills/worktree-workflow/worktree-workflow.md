@@ -2,16 +2,17 @@
 
 Shared between Codex and Claude.
 
-The user works in a `faur-git` workspace and launches the agent from an
-integration worktree, usually `main/` or `develop/` but not necessarily. That
-launch worktree is for reading, planning, and integrating only. Every task the
-user hands over gets its own worktree, created with the `faur` CLI.
+The user works in a `faur-git` workspace and may launch the agent from any
+worktree, including one created for an earlier task. Treat that launch
+worktree as a reading, planning, and later integration location only. Every
+task that will modify tracked files gets a newly created worktree through the
+`faur` CLI, regardless of the launch worktree's name or purpose.
 
 ```
 <workspace>/
 ├── .bare/        # the canonical git repo
 ├── _shared/      # .env, secrets, local config — symlinked into every worktree
-├── main/         # usual launch worktree; never modified by a task
+├── main/         # common launch worktree; never modified by a task
 └── <slug>/       # one worktree per task, created by `faur worktree add`
 ```
 
@@ -26,10 +27,13 @@ Do **not** create one when:
   investigations, and the `plan:` workflow itself.
 - The repo is not a faur workspace, or `faur` is not installed. Check with
   `faur worktrees`; if it errors, work in place and say so in one line.
-- The current worktree is already the dedicated worktree for this task. Never
-  nest — continue in the current one.
-- The user explicitly says to work in the launch worktree or another named
-  worktree.
+- The user explicitly says to work "here", in the launch worktree, or in
+  another named existing worktree.
+
+Being launched from `main`, `develop`, or an existing task worktree never
+creates an implicit exception. Do not infer that the current worktree is for
+the new task, even when its branch name or contents look related. Without the
+explicit in-place instruction above, create a separate sibling worktree.
 
 ## 2. Name the worktree
 
@@ -40,9 +44,9 @@ The slug is the branch name and the directory name.
   `s3-retry`.
 - For `execute:`, take the slug the TODO file records (see below). Without one,
   derive it from the file name: `TODO_AUDIO_EDITING.md` → `audio-editing`.
-- Run `faur worktrees` first. If the slug is already taken:
-  - it is the same task → reuse that worktree, say so, and do not re-create it;
-  - it is a different task → pick a distinct slug, or ask if none is obvious.
+- Run `faur worktrees` first. If the slug is already taken, choose a distinct
+  slug for the new worktree. Reuse the existing one only when the user has
+  explicitly instructed the agent to work there.
 
 ## 3. Create it
 
