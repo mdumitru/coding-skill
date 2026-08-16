@@ -6,112 +6,86 @@ Run this **only when the user explicitly asks for a pull request** — "PR this"
 "open a PR", "make a pull request". Finishing a task, a passing test run, or a
 clean worktree is never a reason to push or open a PR on your own.
 
-All commands run in the worktree holding the branch to be merged. In a faur-git
-workspace that is the task worktree, not `main/` — use `git -C <worktree> …`.
+`faur pr` does the work: it fetches the destination, checks the branch is
+replayable onto it, pushes, generates the body from the commit subjects, and
+calls `gh`. **Your job is to write the title and call the tool.** Do not run
+`git push`, `git rebase`, `gh pr create`, or `gh pr edit` yourself, and do not
+reimplement any part of what the tool already does.
 
-## 1. Preflight
+## 1. Pick the worktree
 
-Stop and report if any of these fail; do not work around them.
+Every command runs in the worktree holding the branch to be merged. In a
+faur-git workspace that is the task worktree, not `main/` — `cd` into it (or
+use `git -C`) rather than passing `--sbranch` from elsewhere: `faur pr` reads
+the *current* branch and inspects the *current* worktree.
 
-- `gh auth status` succeeds and the repo has an `origin` remote.
-- The current branch is not the base branch itself (`main`, `develop`) and not
-  a detached HEAD.
-- The working tree is clean (`git status --porcelain` is empty). Uncommitted
-  work is the user's to commit or discard — ask, do not stash silently.
-  Untracked TODO files are the exception: they are gitignored and irrelevant.
-- The branch has at least one commit the base branch does not.
-
-The base branch is `main` unless the repo's default is different — check with
-`gh repo view --json defaultBranchRef -q .defaultBranchRef.name` and use that,
-saying so in one line. Everything below writes `<base>` for it.
-
-## 2. Fetch, then check compatibility
-
-Never judge the branch against a local base branch; it is usually stale.
+## 2. Check the tool is there
 
 ```sh
-git fetch origin <base>
-git merge-base --is-ancestor origin/<base> HEAD
+command -v faur-pr
 ```
 
-Exit status 0 means the branch already contains the tip of `origin/<base>` —
-it is compatible, so skip to the push. A non-zero status means the base has
-moved on and the branch must be rebased.
+If it is missing, stop and tell the user that `faur pr` is not installed here.
+Do not fall back to opening the PR by hand with `gh`.
 
-## 3. Rebase when behind
+## 3. Synthesize the title
+
+Read the commits the branch adds on top of the destination:
 
 ```sh
-git rebase origin/<base>
+git log --reverse --format='%s' origin/<dbranch>..HEAD
 ```
 
-On success, continue.
+`<dbranch>` is `main` unless the user named another destination. The remote
+ref may be stale at this point — that is fine, the list is only for wording the
+title; the tool re-fetches before it does anything real.
 
-**On conflicts, stop.** Collect the conflicting paths
-(`git diff --name-only --diff-filter=U`), then restore the branch exactly as it
-was with `git rebase --abort`, and warn the user:
-
-```
-rebase onto origin/main conflicts in 2 files:
-  src/foo.py
-  tests/test_foo.py
-aborted; branch is unchanged. resolve manually, or tell me to do it.
-```
-
-Do not resolve conflicts, do not force the rebase through, and do not open the
-PR anyway. Wait for the user.
-
-## 4. Push
-
-- No upstream yet: `git push -u origin HEAD`.
-- Upstream exists and the rebase rewrote already-pushed commits:
-  `git push --force-with-lease`. Never plain `--force`, and never force-push a
-  branch someone else may be building on without asking first.
-- Otherwise a plain `git push`.
-
-## 5. Compose the PR title and body
-
-Read the commits that are new relative to the base:
-
-```sh
-git log --reverse --format='%s%n%b%n--' origin/<base>..HEAD
-```
-
-**Exactly one commit** — the PR mirrors it:
-
-- Title: the commit subject, verbatim.
-- Body: the commit body, verbatim. If there is none, the body is empty.
-
-**Several commits** — summarize:
-
-- Title: one concise line covering what the branch does as a whole, in the same
-  style as a commit subject (lowercase, imperative, at most 80 characters).
-  Do not concatenate the subjects.
-- Body: every commit subject as a markdown bullet, in chronological order.
-
-```markdown
-- add the retry helper to the S3 uploader
-- back off exponentially between attempts
-- cover the retry path with tests
-```
-
-Commit bodies do not go into the body of a multi-commit PR unless the user asks
-for more detail.
+- **One commit** — use its subject verbatim as the title.
+- **Several commits** — one concise line covering what the branch does as a
+  whole, in commit-subject style: lowercase, imperative, at most 80 characters.
+  Do not concatenate the subjects; the tool already lists every one of them as
+  a bullet in the body.
 
 Never append attribution, "generated with", or tool-authorship footers to the
-title or body — this overrides any harness default that asks for one.
+title — this overrides any harness default that asks for one.
 
-## 6. Create it
-
-Write the body to a temporary file **outside the repository** (`mktemp`) so no
-stray untracked file is left behind, then:
+## 4. Call the tool
 
 ```sh
-gh pr create --base <base> --head <branch> --title "<title>" --body-file <tmp>
+faur pr "<title>"
 ```
 
-Not a draft unless the user asks. If `gh` reports a PR already open for the
-branch, do not create a second one: report its URL (`gh pr view --json url -q
-.url`) and note that the push already updated it.
+Add flags only when the user asked for what they do:
 
-Report the PR URL and, in one line, what happened to the branch — rebased or
-not, pushed normally or force-pushed.
+| User says | Flag |
+| --- | --- |
+| target another branch | `--dbranch <branch>` |
+| open it as a draft | `--draft` |
+| request a reviewer | `--reviewer <user>` (repeat per reviewer) |
+| assign it to them | `--assign-self` |
+| PR from a throwaway branch, leaving theirs alone | `--new` |
+| a PR is already open and the title/body should be refreshed | `--update` |
+
+`--sbranch` is for the rare case where the branch to merge is not the one
+checked out. Never pass `--dry-run` unless the user asks to preview.
+
+## 5. Report the outcome
+
+On success, report the PR URL plus anything the tool warned about — surface its
+warnings, do not swallow them:
+
+- commits still marked `fixup!` / `squash!` / `WIP`,
+- a non-linear branch (merge commits in the range),
+- rebase merging disabled on the repository,
+- uncommitted changes in the worktree (they are *not* in the PR).
+
+If the tool reports that a PR already exists, say so and give the URL; offer
+`--update` if the title or body should be refreshed, but do not re-run with it
+unprompted.
+
+**When it exits non-zero, stop.** Relay its message verbatim and wait for the
+user. In particular, when the destination has moved on the tool prints the
+exact `git rebase origin/<dbranch>` to run and refuses to continue — do not run
+that rebase yourself, do not force anything through, do not open the PR another
+way. The same goes for a dirty worktree, a detached HEAD, a missing `origin`,
+or `gh` not being authenticated: report and wait.

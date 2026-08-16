@@ -32,7 +32,9 @@ anything else that did not go smoothly or requires my attention.
 
 ## Pull requests
 
-Only when I explicitly ask for a PR: follow the `pr-workflow` skill — fetch the
-base branch, rebase if the branch is behind, stop and warn me on conflicts,
-push, then open the PR with `gh`. Never push or open a PR unprompted, and never
-put attribution or "generated with" footers in a PR.
+Only when I explicitly ask for a PR: follow the `pr-workflow` skill. `faur pr`
+does the work — the agent's job is to synthesize the title and call the tool
+from the worktree holding the branch. Never push, rebase, or run `gh` by hand,
+and never open a PR unprompted. If the tool stops (usually: the destination
+moved on and a rebase is needed), relay its message and wait for me. Never put
+attribution or "generated with" footers in a PR.
