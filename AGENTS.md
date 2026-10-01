@@ -6,8 +6,9 @@ code in this repository.
 ## What this repo is
 
 The source of truth for agent skills shared between Claude Code and Codex.
-There is no application code and no test suite — the deliverable is markdown
-(the skills) plus one POSIX shell installer that copies them into each harness.
+The deliverable is skill markdown and helper scripts, plus one POSIX shell
+installer that copies them into each harness. Standard-library tests cover the
+deterministic helpers and installer lifecycle.
 
 ## Commands
 
@@ -17,12 +18,13 @@ There is no application code and no test suite — the deliverable is markdown
 ./install.sh --check             # report drift; non-zero exit if anything differs
 ./install.sh -t claude           # one harness only (repeatable)
 ./install.sh --uninstall
+python3 -m unittest             # helper and installer tests
 ```
 
-Verification for installer changes is `--dry-run` then `--check` (there is no
-lint/test target). `--check` must exit 0 on a freshly installed tree, and a
-second `./install.sh` run must report everything "up to date" and create no new
-backup — idempotence is a design requirement.
+Verification for installer changes includes `python3 -m unittest`, then
+`--dry-run` and `--check` in an isolated home. `--check` must exit 0 on a
+freshly installed tree, and a second `./install.sh` run must report everything
+"up to date" and create no new backup — idempotence is a design requirement.
 
 ## Architecture
 
@@ -31,10 +33,11 @@ backup — idempotence is a design requirement.
 `~/.codex`). Editing this repo has no effect on any harness until `install.sh`
 is re-run; `--check` exists to find installed copies that drifted.
 
-**Skills are two files.** `SKILL.md` holds the YAML frontmatter (`name`,
-`description`) plus a short summary and points at a sibling `<name>.md` with the
-full instructions. The `description` is what each harness matches on to decide
-whether to load the skill, so it must state the trigger explicitly.
+**Skills are self-contained directories.** `SKILL.md` holds the YAML
+frontmatter (`name`, `description`) and routing instructions. A skill may also
+contain focused sibling references, scripts, or tests. The `description` is
+what each harness matches on to decide whether to load the skill, so it must
+state the trigger explicitly.
 
 **Self-containment is load-bearing.** A `SKILL.md` may only reference paths
 inside its own directory, relatively. That is what lets the identical directory

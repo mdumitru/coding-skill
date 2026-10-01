@@ -10,8 +10,7 @@ Skills here:
 | --- | --- |
 | `agent-baseline` | always on: succinct replies, robust typed Python, commit style |
 | `worktree-workflow` | isolate changes in a [faur-git](https://github.com/faur-ai/faur-git) task worktree, then explicitly `finish` them into an integration worktree |
-| `plan-workflow` | a message containing the keyword `plan:` |
-| `execute-workflow` | a message containing the keyword `execute:` |
+| `task-workflow` | a message containing the exact keyword `plan:` or `execute:` |
 
 ## Install
 
@@ -47,9 +46,11 @@ script works on machines that have only one of the two installed.
 ## Layout
 
 ```
-skills/<name>/SKILL.md      frontmatter (name, description) + short summary
-skills/<name>/<name>.md     the full instructions, referenced relatively
-shared/instructions.md      body of the managed block in CLAUDE.md / AGENTS.md
+skills/<name>/SKILL.md       frontmatter, routing, and core instructions
+skills/<name>/*.md           optional focused references
+skills/<name>/scripts/       optional deterministic helpers
+tests/                       standard-library helper and installer tests
+shared/instructions.md       body of the managed block in CLAUDE.md / AGENTS.md
 install.sh
 ```
 
@@ -86,7 +87,8 @@ refuses to do it at all under `-n`.
    frontmatter. The `description` is what each harness matches on to decide
    whether to load the skill, so state the trigger there explicitly.
 2. Put long instructions in a sibling file and reference it relatively.
-3. `./install.sh`
+3. Add scripts or tests when deterministic behavior needs them.
+4. Run `python3 -m unittest`, then `./install.sh`.
 
 `install.sh` discovers any directory under `skills/` containing a `SKILL.md`, so
 it needs no edit.

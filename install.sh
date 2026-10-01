@@ -21,6 +21,7 @@ BACKUP_DIR="$BACKUP_ROOT/$(date '+%y%m%d_%H%M%S')"
 BEGIN_MARKER="<!-- BEGIN coding-skill -->"
 END_MARKER="<!-- END coding-skill -->"
 ALL_TARGETS="claude codex"
+RETIRED_SKILLS="plan-workflow execute-workflow"
 
 MODE="install"
 BACKUP=1
@@ -222,6 +223,31 @@ install_skill() {
     info "  $2: installed"
 }
 
+# Remove only explicitly retired skills. They are no longer present in the
+# source tree, so every installed copy is backed up before migration.
+retire_skill() {
+    retire_dst="$1/$2"
+    if test ! -e "$retire_dst"; then
+        info "  $2 (retired): absent"
+        return 0
+    fi
+
+    if test "$DRY_RUN" -eq 1; then
+        info "  $2 (retired): would remove \"$retire_dst\""
+        backup_path "$retire_dst"
+        return 0
+    fi
+
+    if test "$BACKUP" -eq 0; then
+        die "refusing to remove retired skill \"$retire_dst\" with -n; drop -n and retry"
+    fi
+
+    info "  $2 (retired): migrating installed copy"
+    backup_path "$retire_dst"
+    rm -rf -- "$retire_dst" || die "cannot remove retired skill \"$retire_dst\""
+    info "    removed"
+}
+
 install_instructions() {
     if block_is_current "$1"; then
         info "  $(basename -- "$1"): up to date"
@@ -289,6 +315,16 @@ check_skill() {
     fi
 }
 
+check_retired_skill() {
+    check_retired_dst="$1/$2"
+    if test -e "$check_retired_dst"; then
+        info "  $2 (retired): STALE"
+        DRIFT=1
+    else
+        info "  $2 (retired): absent"
+    fi
+}
+
 check_instructions() {
     if test ! -f "$1"; then
         info "  $(basename -- "$1"): MISSING"
@@ -327,6 +363,27 @@ uninstall_skill() {
     info "  $2: removed"
 }
 
+uninstall_retired_skill() {
+    uninstall_retired_dst="$1/$2"
+    test -e "$uninstall_retired_dst" || return 0
+
+    if test "$DRY_RUN" -eq 1; then
+        info "  $2 (retired): would remove \"$uninstall_retired_dst\""
+        backup_path "$uninstall_retired_dst"
+        return 0
+    fi
+
+    if test "$BACKUP" -eq 0; then
+        die "refusing to remove retired skill \"$uninstall_retired_dst\" with -n; drop -n and retry"
+    fi
+
+    info "  $2 (retired): backing up installed copy before removal"
+    backup_path "$uninstall_retired_dst"
+    rm -rf -- "$uninstall_retired_dst" \
+        || die "cannot remove retired skill \"$uninstall_retired_dst\""
+    info "    removed"
+}
+
 uninstall_instructions() {
     test -f "$1" || return 0
     has_block "$1" || return 0
@@ -358,6 +415,17 @@ process_target() {
 
     info "$1 ($target_dir):"
 
+    if test "$DRY_RUN" -eq 0 && test "$BACKUP" -eq 0; then
+        case "$MODE" in
+            install | uninstall)
+                for skill in $RETIRED_SKILLS; do
+                    test ! -e "$target_skills_dir/$skill" || die \
+                        "refusing to remove retired skill \"$target_skills_dir/$skill\" with -n; drop -n and retry"
+                done
+                ;;
+        esac
+    fi
+
     if test "$MODE" = "install" && test ! -d "$target_skills_dir"; then
         if test "$DRY_RUN" -eq 1; then
             info "  would create \"$target_skills_dir\""
@@ -372,6 +440,14 @@ process_target() {
             install) install_skill "$target_skills_dir" "$skill" ;;
             check) check_skill "$target_skills_dir" "$skill" ;;
             uninstall) uninstall_skill "$target_skills_dir" "$skill" ;;
+        esac
+    done
+
+    for skill in $RETIRED_SKILLS; do
+        case "$MODE" in
+            install) retire_skill "$target_skills_dir" "$skill" ;;
+            check) check_retired_skill "$target_skills_dir" "$skill" ;;
+            uninstall) uninstall_retired_skill "$target_skills_dir" "$skill" ;;
         esac
     done
 

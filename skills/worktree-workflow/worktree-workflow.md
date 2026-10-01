@@ -1,174 +1,133 @@
 # Worktree Workflow
 
-Shared between Codex and Claude.
+Use this lifecycle in a faur-git workspace: a Git common directory named
+`.bare` with sibling worktrees and optional workspace-level `_shared/` and
+`_plans/` directories. The launch worktree is for reading, planning, and later
+integration; merely starting in a task worktree never authorizes reusing it for
+a new task.
 
-The user works in a `faur-git` workspace and may launch the agent from any
-worktree, including one created for an earlier task. Treat that launch
-worktree as a reading, planning, and later integration location only. Every
-task that will modify tracked files gets a newly created worktree through the
-`faur` CLI, regardless of the launch worktree's name or purpose.
+## 1. Decide whether to isolate the task
 
-```
-<workspace>/
-├── .bare/        # the canonical git repo
-├── _shared/      # .env, secrets, local config — symlinked into every worktree
-├── main/         # common launch worktree; never modified by a task
-└── <slug>/       # one worktree per task, created by `faur worktree add`
-```
+Create a new task worktree before any tracked-file mutation, however small.
+Do not create one for read-only work, including `plan:`, or when the user
+explicitly says to work "here" or in a named existing worktree. A plain Git
+repository is also an exception: work in place and mention that it is not a
+faur workspace.
 
-## 1. Decide whether a worktree is needed
+Use `faur worktrees --json` as the authoritative inventory. If it cannot list
+the repository as a faur workspace, do not imitate its mechanics with raw
+`git worktree` commands.
 
-Create one for **any task that will modify tracked files**, however small — a
-one-line fix still gets its own worktree.
+## 2. Resolve the launch record and slug
 
-Do **not** create one when:
+Before creating anything, run `faur worktrees --json` from the launch
+worktree. Canonicalize the current directory, then select the unique JSON entry
+whose canonical `path` contains it. Require that entry to exist and have a
+non-null `branch`; stop on missing, detached, or ambiguous state.
 
-- The task is read-only: questions, explanations, code reading, reviews,
-  investigations, and the `plan:` workflow itself.
-- The repo is not a faur workspace, or `faur` is not installed. Check with
-  `faur worktrees`; if it errors, work in place and say so in one line.
-- The user explicitly says to work "here", in the launch worktree, or in
-  another named existing worktree.
+Record the entry's exact canonical `path` and `branch`. For `execute:`, the
+`task-workflow` skill records both values in the external plan before this
+workflow continues. They are the default destination for a later `finish`.
 
-Being launched from `main`, `develop`, or an existing task worktree never
-creates an implicit exception. Do not infer that the current worktree is for
-the new task, even when its branch name or contents look related. Without the
-explicit in-place instruction above, create a separate sibling worktree.
+Use a short lowercase kebab-case slug, normally one to three words. An
+`execute:` plan supplies it through validated `Worktree:` metadata. Check the
+inventory for a matching name, canonical path, or branch:
 
-## 2. Name the worktree
+- Never silently reuse a collision.
+- If the user explicitly authorized the matching existing worktree, use it.
+- Otherwise choose a distinct slug. For `execute:`, update `Worktree:` in the
+  external plan and validate the plan again before creation.
 
-The slug is the branch name and the directory name.
+## 3. Let faur create and resolve the task worktree
 
-- Derive a short kebab-case slug from the task: 1–3 words, no `feature/`
-  prefix. "implement foo" → `foo`; "add retry to the S3 uploader" →
-  `s3-retry`.
-- For `execute:`, take the slug the TODO file records (see below). Without one,
-  derive it from the file name: `TODO_AUDIO_EDITING.md` → `audio-editing`.
-- Run `faur worktrees` first. If the slug is already taken, choose a distinct
-  slug for the new worktree. Reuse the existing one only when the user has
-  explicitly instructed the agent to work there.
-
-## 3. Create it
-
-From the launch worktree:
+From the recorded launch path, run exactly:
 
 ```sh
-faur worktree add <slug> --base <current-branch>
+faur worktree add <slug> --base <launch-branch>
 ```
 
-Before creating it, record the absolute path and branch of the worktree from
-which the agent was launched. This is the default integration destination for
-a later `finish` request; do not assume it is `main`. After creation, record
-the task branch's starting commit so its eventual commit range is exact.
+Do not reconstruct `git worktree` operations, branch creation, fetching,
+shared-file linking, environment setup, or hooks yourself. If `faur` refuses,
+report its diagnostic and preserve the launch state.
 
-This branches from current remote refs (it fetches first), mirrors `_shared/`
-in as symlinks, then runs `uv venv`, `uv sync --extra dev`, and installs
-pre-commit hooks. Add `--no-fetch` only when offline. If the branch already
-exists it is checked out rather than recreated.
+After success, run `faur worktrees --json` again and require exactly one entry
+for the new branch/name with a present path. Use the returned canonical path
+for all later reads, edits, tests, and commits; do not construct it by hand.
 
-The new worktree is a **sibling of `main/`**: `<workspace>/<slug>`. Resolve
-`<workspace>` as the parent of the directory `git rev-parse --git-common-dir`
-reports (that path ends in `.bare`).
+## 4. Work only in the task worktree
 
-## 4. Work there, not in main
+- Run repository commands and tests from the task path, using its environment.
+- Keep the launch worktree unchanged.
+- Treat `_shared/` symlinks as shared mutable state and leave them alone unless
+  the task specifically concerns them.
+- Keep scratch data outside the workspace. Task plans remain in the external
+  workspace-level `_plans/` directory resolved by `task-workflow`; never copy,
+  stage, or commit them.
+- Follow the repository's commit policy. An `execute:` run completes and
+  commits one validated plan task at a time.
 
-Treat `<workspace>/<slug>` as the working root for the rest of the task:
+## 5. Complete the task without integrating it
 
-- Use absolute paths under it for every read and edit.
-- Run git as `git -C <workspace>/<slug> …`. Every commit belongs to the task
-  worktree; `main/` must end the session with no new commits and no changes.
-- Run tests and tools from inside the worktree so they use *its* `.venv`
-  (`uv run …`). Never reuse `main/.venv`.
-- Leave no untracked files behind: `faur worktree remove` refuses to delete a
-  worktree containing untracked files that are not `_shared/` symlinks. Put
-  scratch files outside the workspace.
-- `_shared/` entries are symlinks to one shared copy — editing `.env` in the
-  worktree edits it for every worktree, including `main/`. Treat them as
-  read-only unless the task is about them.
+After verification and the final commit, run `faur worktrees --json` and use
+the task entry's canonical path, branch, and dirty state in the completion
+report. Include the commits made for the task.
 
-## 5. Interaction with `plan:` and `execute:`
+Then stop. Do not push, open a pull request, integrate, remove the worktree, or
+delete any branch. A PR requires a separate explicit PR request and the
+`pr-workflow` skill. Integration and removal require a later user message whose
+command is exactly `finish` or `finish in <branch>`; wording in the original
+task request does not authorize it.
 
-**`plan:` creates no worktree.** Planning is read-only. Write the TODO file in
-the launch worktree and record the slug the execute step should use, as the
-first line under the title:
+## 6. Handle explicit finish authorization
 
-```markdown
-# TODO: audio editing
+For `finish`, use the launch path and branch recorded before task creation. For
+`finish in <branch>`, use that branch as the explicit destination. From the
+recorded launch worktree, first refresh `faur worktrees --json` and require:
 
-Worktree: `audio-editing`
+- the task slug still resolves uniquely to the expected task path and branch;
+- the recorded launch path still holds its recorded branch for `finish`; or
+- the explicitly named destination branch is checked out in exactly one
+  present worktree for `finish in <branch>`.
+
+Do not switch branches or repair ambiguity manually. Run the exact preflight:
+
+```sh
+faur worktree finish <slug> --dry-run
 ```
 
-**`execute:` creates the worktree first**, before touching any code, then works
-inside it. **The TODO file stays in the launch worktree** — read and tick it off
-at its recorded absolute path while the code changes happen in the task
-worktree. This keeps the TODO out of the task worktree, which keeps
-`faur worktree remove` safe, and keeps it where the user is.
+For `finish in <branch>`, append `--branch <branch>` to that command. If the
+preflight succeeds, run the same command from the same recorded launch path
+without `--dry-run`. Do not substitute manual commit-range calculation,
+cherry-picking, rebasing, worktree removal, or branch deletion.
 
-TODO files are never committed, in either worktree.
+`faur worktree finish` owns the complete safety contract. It refuses dirty,
+untracked, ambiguous, detached, or unsupported in-progress state before
+replay; journals replay progress; skips already integrated commits; verifies
+that every source commit is accounted for before removal; removes the task
+worktree; and deletes the verified local task branch. It never deletes a remote
+branch.
 
-## 6. Complete the task and report
+If replay stops on a conflict, leave Git and the journal intact and report the
+tool's conflicting paths and recovery instructions. Once the conflict is
+resolved and staged, rerun the same `faur worktree finish` command; it resumes
+instead of replaying completed work. Never remove the task worktree while the
+command is incomplete.
 
-Commit per item (baseline commit conventions), then **stop**. Do not push, do
-not open a PR, do not integrate the commits, and do not remove the worktree.
-The user must request integration explicitly in a **new message after task
-completion**. A `finish` phrase in the original task request does not authorize
-integration or removal. When the user does ask for a PR, follow the
-`pr-workflow` skill from inside the task worktree. Report in a couple of lines:
+After success, run `faur worktrees --json` again. Report the destination entry
+and confirm that the task entry and local task branch were removed. Do not ask
+whether to delete the local task branch: successful `finish` already did so.
+If the command reported a same-named remote branch, note that it remains
+untouched.
 
-```
-worktree: ../audio-editing (branch audio-editing), 3 commits, not pushed
-send `finish` to integrate here, or `finish in <branch>` elsewhere
-```
+## 7. Other worktree operations
 
-## 7. Handle an explicit finish request
+Only perform these when the user asks. Prefer a dry-run when the command
+supports it and the effect is destructive or unclear.
 
-Only run this workflow when, after the completed-task report, the user sends a
-new message explicitly saying `finish` or `finish in <branch>`.
-
-- `finish` targets the recorded launch worktree and its recorded branch.
-- `finish in <branch>` targets the existing worktree that has `<branch>`
-  checked out. Do not silently switch another worktree to that branch. If no
-  worktree has it checked out, stop, warn the user clearly, and ask where to
-  integrate.
-
-Then:
-
-1. Inspect both worktrees and identify the commits after the task branch's
-   recorded starting commit, ordered oldest to newest. Show that exact list in
-   the progress update and verify it contains only this task's commits.
-2. Require both worktrees to be clean and verify that the target is still on
-   the intended branch. If anything is dirty, ambiguous, or unexpectedly
-   diverged, stop before changing anything and warn the user clearly.
-3. In the target worktree, cherry-pick those commits oldest to newest. If any
-   cherry-pick conflicts or fails, stop immediately, preserve Git's state for
-   diagnosis, warn the user clearly, and do not remove the task worktree.
-4. After every cherry-pick succeeds, verify the resulting history and run
-   `faur worktree remove <slug>`. If removal fails, warn the user clearly and
-   leave the branch intact.
-5. Report the integrated commits and removal result, then ask a direct yes/no
-   question: whether to run `git branch -D <branch>`. Never delete the branch
-   before the user answers yes in a later message.
-
-Do not push during this workflow. Treat any unexpected state, partial success,
-conflict, skipped/empty cherry-pick, or command failure as something requiring
-an immediate, prominent warning and the user's attention.
-
-## 8. Managing worktrees on request
-
-Only when asked:
-
-- `faur worktrees` — table of every worktree with branch, ahead/behind, dirty
-  state (`--json` for parsing).
-- `faur worktree remove <slug>` — safe: deletes `_shared/` symlinks, refuses on
-  real untracked files. Never pass `--force` without asking first; it destroys
-  uncommitted work.
-- `faur prune` — bulk-remove worktrees merged into `main`. Show
-  `faur prune --dry-run` output and get confirmation before running it for real.
-- `faur rename <old> <new>` — renames directory and matching branch.
-- `faur sync-shared` — re-mirror `_shared/` into worktrees created before a file
-  was added to it.
-- `faur health` — preflight for `uv`, `pre-commit`, `docker buildx`, `gcloud`,
-  `_shared/`.
-
-Every one of these accepts `--dry-run`. Use it whenever the effect is
-destructive or unclear.
+- `faur worktrees --json` lists canonical worktree state for automation.
+- `faur worktree remove <name> --dry-run` previews standalone removal; never
+  add `--force` without explicit authorization because it can destroy work.
+- `faur prune --dry-run` previews bulk cleanup.
+- `faur rename <old> <new> --dry-run` previews a worktree/branch rename.
+- `faur sync-shared --dry-run` previews remirroring `_shared/` entries.
+- `faur health` diagnoses workspace prerequisites.

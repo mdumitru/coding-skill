@@ -1,26 +1,19 @@
 ---
 name: worktree-workflow
-description: Use whenever a task will modify files in a faur-git workspace (a repo laid out as .bare/ + worktrees + _shared/, managed by the `faur` CLI), when managing its worktrees, or when the user sends `finish` or `finish in` followed by a branch after a task. Always create a new task worktree regardless of which worktree the agent starts in, unless the user explicitly says to work here or in a named existing worktree. On an explicit later finish request, cherry-pick its commits into the requested integration worktree and remove it.
+description: Use whenever a task will modify files in a faur-git workspace (`.bare/` plus sibling worktrees), when managing those worktrees, or when the user later sends exact `finish` or `finish in` authorization naming a branch. Resolve state with `faur worktrees --json` and delegate creation, integration, and removal to `faur` commands.
 ---
 
 # Worktree Workflow
 
-Follow `worktree-workflow.md` in this skill directory for the full details.
+Follow `worktree-workflow.md` for the deterministic lifecycle. In short:
 
-In short:
-- The user may launch the agent from any worktree. Record it and never do task
-  work there merely because it is current.
-- Before changing anything, create a task worktree: `faur worktree add <slug>`.
-  Then do all work, all commits, and all test runs inside that worktree.
-- Only an explicit instruction to work "here" or in a named existing worktree
-  permits skipping creation. Starting in a task worktree does not.
-- `plan:` writes its TODO file in `main/` and creates no worktree. `execute:`
-  creates the worktree, then works there while ticking off the TODO that stays
-  in `main/`.
-- Commit per item, then stop and report the worktree path and branch. Do not
-  integrate or remove it until the user sends a new message explicitly saying
-  `finish` or `finish in <branch>`.
-- On `finish`, cherry-pick the task commits in order into the launch worktree;
-  on `finish in <branch>`, use that branch's existing worktree. Remove the task
-  worktree only after every cherry-pick succeeds, then ask whether to delete
-  its branch.
+- Resolve the launch record and collisions with `faur worktrees --json`, then
+  create a new task using `faur worktree add <slug> --base <launch-branch>`.
+- Keep task plans in workspace-level `_plans/`; the `task-workflow` skill owns
+  their path and validation rules.
+- Commit and verify in the task worktree, then stop. Do not push, open a PR,
+  integrate, or remove it without the corresponding explicit request.
+- Only a later exact `finish` or `finish in <branch>` authorizes running
+  `faur worktree finish`: first with `--dry-run`, then for real. That command
+  performs and verifies integration, removes the worktree, and deletes the
+  verified local task branch while leaving remote branches untouched.

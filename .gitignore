@@ -1,6 +1,11 @@
 # TODO tracking files never belong in Git history.
 TODO*.md
 todo*.md
+_plans/
+
+# Python test artifacts.
+__pycache__/
+*.py[cod]
 
 # Editor and OS cruft.
 *.swp
