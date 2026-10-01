@@ -43,6 +43,14 @@ mirroring its path under `$HOME`. A re-run with nothing to do creates no backup.
 A harness whose directory is missing is skipped with a message, so the same
 script works on machines that have only one of the two installed.
 
+Interactive output uses color and status symbols; redirected output stays
+plain. Set `NO_COLOR=1` to disable color or `CLICOLOR_FORCE=1` to preserve it
+when redirecting output.
+
+Generated Python bytecode (`__pycache__`, `*.pyc`, and `*.pyo`) is neither
+installed nor considered by `--check`. A normal install also removes these
+artifacts from older installed copies.
+
 ## Layout
 
 ```

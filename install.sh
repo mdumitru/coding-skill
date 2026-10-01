@@ -30,6 +30,35 @@ TARGETS=""
 DRIFT=0
 BACKUP_MADE=0
 
+# Keep redirected output machine-friendly, but make interactive runs easy to
+# scan. NO_COLOR and CLICOLOR_FORCE follow their widely used conventions.
+USE_COLOR=0
+if test -z "${NO_COLOR+x}"; then
+    if test "${CLICOLOR_FORCE:-0}" != "0"; then
+        USE_COLOR=1
+    elif test -t 1 && test "${TERM:-dumb}" != "dumb"; then
+        USE_COLOR=1
+    fi
+fi
+
+COLOR_RESET=""
+COLOR_BOLD=""
+COLOR_DIM=""
+COLOR_RED=""
+COLOR_GREEN=""
+COLOR_YELLOW=""
+COLOR_CYAN=""
+
+if test "$USE_COLOR" -eq 1; then
+    COLOR_RESET=$(printf '\033[0m')
+    COLOR_BOLD=$(printf '\033[1m')
+    COLOR_DIM=$(printf '\033[2m')
+    COLOR_RED=$(printf '\033[31m')
+    COLOR_GREEN=$(printf '\033[32m')
+    COLOR_YELLOW=$(printf '\033[33m')
+    COLOR_CYAN=$(printf '\033[36m')
+fi
+
 show_help() {
     cat << __EOF__
 Install the shared Claude Code / Codex skills from this repo.
@@ -60,6 +89,9 @@ Options:
         do not back up files that are replaced; the backup is made by default
         into "$BACKUP_ROOT/<timestamp>/"
 
+Output uses color when connected to a terminal. Set NO_COLOR to disable it or
+CLICOLOR_FORCE=1 to retain it when output is redirected.
+
 Installed locations:
     claude   \$HOME/.claude/skills/<skill>          + \$HOME/.claude/CLAUDE.md
     codex    \$CODEX_HOME/skills/<skill>            + \$CODEX_HOME/AGENTS.md
@@ -73,12 +105,54 @@ __EOF__
 }
 
 die() {
-    echo "$SCRIPT_NAME: $*" >&2
+    printf '%s%s%s %s: %s\n' \
+        "$COLOR_RED" "$COLOR_BOLD" "✗" "$SCRIPT_NAME" "$*" >&2
+    printf '%s' "$COLOR_RESET" >&2
     exit 1
 }
 
-info() {
-    echo "$*"
+banner() {
+    printf '%s%s%s\n' "$COLOR_BOLD" "$*" "$COLOR_RESET"
+}
+
+target_banner() {
+    printf '\n%s%s◆ %s%s  %s%s%s\n' \
+        "$COLOR_CYAN" "$COLOR_BOLD" "$2" "$COLOR_RESET" \
+        "$COLOR_DIM" "$1" "$COLOR_RESET"
+}
+
+status_ok() {
+    printf '  %s✓%s %s\n' "$COLOR_GREEN" "$COLOR_RESET" "$*"
+}
+
+status_plan() {
+    printf '  %s→%s %s\n' "$COLOR_CYAN" "$COLOR_RESET" "$*"
+}
+
+status_note() {
+    printf '  %s•%s %s\n' "$COLOR_DIM" "$COLOR_RESET" "$*"
+}
+
+status_warn() {
+    printf '  %s!%s %s\n' "$COLOR_YELLOW" "$COLOR_RESET" "$*"
+}
+
+status_error() {
+    printf '  %s✗%s %s\n' "$COLOR_RED" "$COLOR_RESET" "$*"
+}
+
+detail() {
+    printf '    %s%s%s\n' "$COLOR_DIM" "$*" "$COLOR_RESET"
+}
+
+summary_ok() {
+    printf '\n%s%s✓ %s%s\n' \
+        "$COLOR_GREEN" "$COLOR_BOLD" "$*" "$COLOR_RESET"
+}
+
+summary_error() {
+    printf '\n%s%s✗ %s%s\n' \
+        "$COLOR_RED" "$COLOR_BOLD" "$*" "$COLOR_RESET"
 }
 
 target_home() {
@@ -115,7 +189,7 @@ backup_path() {
     test -e "$1" || return 0
 
     if test "$BACKUP" -eq 0; then
-        info "    not backing up \"$1\" (-n given)"
+        detail "not backing up \"$1\" (-n given)"
         return 0
     fi
 
@@ -123,7 +197,7 @@ backup_path() {
     backup_dst="$BACKUP_DIR/$backup_rel"
 
     if test "$DRY_RUN" -eq 1; then
-        info "    would back up \"$1\" -> \"$backup_dst\""
+        detail "would back up \"$1\" -> \"$backup_dst\""
         return 0
     fi
 
@@ -132,11 +206,34 @@ backup_path() {
         || die "cannot create \"$(dirname -- "$backup_dst")\""
     cp -R -- "$1" "$backup_dst" || die "cannot back up \"$1\""
     BACKUP_MADE=1
-    info "    backed up to \"$backup_dst\""
+    detail "backed up to \"$backup_dst\""
 }
 
 trees_identical() {
-    diff -r -q -- "$1" "$2" > /dev/null 2>&1
+    diff -r -q \
+        -x '__pycache__' -x '*.pyc' -x '*.pyo' \
+        -- "$1" "$2" > /dev/null 2>&1
+}
+
+has_generated_python_artifacts() {
+    test -d "$1" || return 1
+    find "$1" \
+        \( -type d -name __pycache__ \
+        -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) \
+        -print 2> /dev/null | grep -q .
+}
+
+remove_generated_python_artifacts() {
+    test -d "$1" || return 0
+
+    find "$1" -type d -name __pycache__ -prune \
+        -exec rm -rf -- {} +
+    find "$1" -type f \( -name '*.pyc' -o -name '*.pyo' \) \
+        -exec rm -f -- {} +
+
+    if has_generated_python_artifacts "$1"; then
+        die "cannot remove generated Python cache files from \"$1\""
+    fi
 }
 
 # Print the body currently stored between the managed markers.
@@ -205,12 +302,23 @@ install_skill() {
     install_dst="$1/$2"
 
     if trees_identical "$install_src" "$install_dst"; then
-        info "  $2: up to date"
+        if has_generated_python_artifacts "$install_dst"; then
+            if test "$DRY_RUN" -eq 1; then
+                status_plan "$2: would remove generated Python cache files"
+                backup_path "$install_dst"
+            else
+                backup_path "$install_dst"
+                remove_generated_python_artifacts "$install_dst"
+                status_ok "$2: up to date; removed generated Python cache files"
+            fi
+        else
+            status_ok "$2: up to date"
+        fi
         return 0
     fi
 
     if test "$DRY_RUN" -eq 1; then
-        info "  $2: would install into \"$install_dst\""
+        status_plan "$2: would install into \"$install_dst\""
         backup_path "$install_dst"
         return 0
     fi
@@ -220,7 +328,8 @@ install_skill() {
     rm -rf -- "$install_dst" || die "cannot remove \"$install_dst\""
     cp -R -- "$install_src" "$install_dst" \
         || die "cannot copy \"$install_src\" -> \"$install_dst\""
-    info "  $2: installed"
+    remove_generated_python_artifacts "$install_dst"
+    status_ok "$2: installed"
 }
 
 # Remove only explicitly retired skills. They are no longer present in the
@@ -228,12 +337,12 @@ install_skill() {
 retire_skill() {
     retire_dst="$1/$2"
     if test ! -e "$retire_dst"; then
-        info "  $2 (retired): absent"
+        status_note "$2 (retired): absent"
         return 0
     fi
 
     if test "$DRY_RUN" -eq 1; then
-        info "  $2 (retired): would remove \"$retire_dst\""
+        status_plan "$2 (retired): would remove \"$retire_dst\""
         backup_path "$retire_dst"
         return 0
     fi
@@ -242,26 +351,26 @@ retire_skill() {
         die "refusing to remove retired skill \"$retire_dst\" with -n; drop -n and retry"
     fi
 
-    info "  $2 (retired): migrating installed copy"
+    status_plan "$2 (retired): migrating installed copy"
     backup_path "$retire_dst"
     rm -rf -- "$retire_dst" || die "cannot remove retired skill \"$retire_dst\""
-    info "    removed"
+    detail "removed"
 }
 
 install_instructions() {
     if block_is_current "$1"; then
-        info "  $(basename -- "$1"): up to date"
+        status_ok "$(basename -- "$1"): up to date"
         return 0
     fi
 
     if test -f "$1" && has_block "$1"; then
         if test "$DRY_RUN" -eq 1; then
-            info "  $(basename -- "$1"): would refresh the managed block"
+            status_plan "$(basename -- "$1"): would refresh the managed block"
             return 0
         fi
         backup_path "$1"
         replace_block "$1"
-        info "  $(basename -- "$1"): managed block refreshed"
+        status_ok "$(basename -- "$1"): managed block refreshed"
         return 0
     fi
 
@@ -271,23 +380,23 @@ install_instructions() {
             die "refusing to replace unmanaged \"$1\" with -n; drop -n and retry"
         fi
         if test "$DRY_RUN" -eq 1; then
-            info "  $(basename -- "$1"): would replace unmanaged content"
+            status_plan "$(basename -- "$1"): would replace unmanaged content"
             backup_path "$1"
             return 0
         fi
-        info "  $(basename -- "$1"): replacing unmanaged content"
+        status_plan "$(basename -- "$1"): replacing unmanaged content"
         backup_path "$1"
         write_block_only "$1"
-        info "    keep anything you still need from the backup above"
+        detail "keep anything you still need from the backup above"
         return 0
     fi
 
     if test "$DRY_RUN" -eq 1; then
-        info "  $(basename -- "$1"): would create with the managed block"
+        status_plan "$(basename -- "$1"): would create with the managed block"
         return 0
     fi
     write_block_only "$1"
-    info "  $(basename -- "$1"): created"
+    status_ok "$(basename -- "$1"): created"
 }
 
 check_skill() {
@@ -295,53 +404,55 @@ check_skill() {
     check_dst="$1/$2"
 
     if test ! -e "$check_dst"; then
-        info "  $2: MISSING"
+        status_error "$2: MISSING"
         DRIFT=1
         return 0
     fi
 
     if test -L "$check_dst"; then
-        info "  $2: is a symlink, expected a copy"
+        status_warn "$2: is a symlink, expected a copy"
         DRIFT=1
     fi
 
-    check_diff=$(diff -r -- "$check_src" "$check_dst" 2>&1)
+    check_diff=$(diff -r \
+        -x '__pycache__' -x '*.pyc' -x '*.pyo' \
+        -- "$check_src" "$check_dst" 2>&1)
     if test -n "$check_diff"; then
-        info "  $2: DRIFTED"
-        echo "$check_diff" | sed 's/^/    /'
+        status_error "$2: DRIFTED"
+        printf '%s\n' "$check_diff" | sed 's/^/    /'
         DRIFT=1
     else
-        info "  $2: ok"
+        status_ok "$2: ok"
     fi
 }
 
 check_retired_skill() {
     check_retired_dst="$1/$2"
     if test -e "$check_retired_dst"; then
-        info "  $2 (retired): STALE"
+        status_error "$2 (retired): STALE"
         DRIFT=1
     else
-        info "  $2 (retired): absent"
+        status_note "$2 (retired): absent"
     fi
 }
 
 check_instructions() {
     if test ! -f "$1"; then
-        info "  $(basename -- "$1"): MISSING"
+        status_error "$(basename -- "$1"): MISSING"
         DRIFT=1
         return 0
     fi
 
     if ! has_block "$1"; then
-        info "  $(basename -- "$1"): no managed block"
+        status_error "$(basename -- "$1"): no managed block"
         DRIFT=1
         return 0
     fi
 
     if block_is_current "$1"; then
-        info "  $(basename -- "$1"): ok"
+        status_ok "$(basename -- "$1"): ok"
     else
-        info "  $(basename -- "$1"): managed block DRIFTED"
+        status_error "$(basename -- "$1"): managed block DRIFTED"
         DRIFT=1
     fi
 }
@@ -351,16 +462,16 @@ uninstall_skill() {
     test -e "$uninstall_dst" || return 0
 
     if test "$DRY_RUN" -eq 1; then
-        info "  $2: would remove \"$uninstall_dst\""
+        status_plan "$2: would remove \"$uninstall_dst\""
         return 0
     fi
 
     if ! trees_identical "$SKILLS_DIR/$2" "$uninstall_dst"; then
-        info "  $2: differs from the repo, backing it up before removal"
+        status_warn "$2: differs from the repo, backing it up before removal"
         backup_path "$uninstall_dst"
     fi
     rm -rf -- "$uninstall_dst" || die "cannot remove \"$uninstall_dst\""
-    info "  $2: removed"
+    status_ok "$2: removed"
 }
 
 uninstall_retired_skill() {
@@ -368,7 +479,7 @@ uninstall_retired_skill() {
     test -e "$uninstall_retired_dst" || return 0
 
     if test "$DRY_RUN" -eq 1; then
-        info "  $2 (retired): would remove \"$uninstall_retired_dst\""
+        status_plan "$2 (retired): would remove \"$uninstall_retired_dst\""
         backup_path "$uninstall_retired_dst"
         return 0
     fi
@@ -377,11 +488,11 @@ uninstall_retired_skill() {
         die "refusing to remove retired skill \"$uninstall_retired_dst\" with -n; drop -n and retry"
     fi
 
-    info "  $2 (retired): backing up installed copy before removal"
+    status_warn "$2 (retired): backing up installed copy before removal"
     backup_path "$uninstall_retired_dst"
     rm -rf -- "$uninstall_retired_dst" \
         || die "cannot remove retired skill \"$uninstall_retired_dst\""
-    info "    removed"
+    detail "removed"
 }
 
 uninstall_instructions() {
@@ -389,7 +500,7 @@ uninstall_instructions() {
     has_block "$1" || return 0
 
     if test "$DRY_RUN" -eq 1; then
-        info "  $(basename -- "$1"): would remove the managed block"
+        status_plan "$(basename -- "$1"): would remove the managed block"
         return 0
     fi
 
@@ -397,9 +508,9 @@ uninstall_instructions() {
     strip_block "$1"
     if file_is_blank "$1"; then
         rm -f -- "$1" || die "cannot remove \"$1\""
-        info "  $(basename -- "$1"): removed (nothing left outside the block)"
+        status_ok "$(basename -- "$1"): removed (nothing left outside the block)"
     else
-        info "  $(basename -- "$1"): managed block removed"
+        status_ok "$(basename -- "$1"): managed block removed"
     fi
 }
 
@@ -409,11 +520,16 @@ process_target() {
     target_skills_dir="$target_dir/skills"
 
     if test ! -d "$target_dir"; then
-        echo "\"$target_dir\" not found! Nothing to do here ..." >&2
+        printf '%s!%s %s\n' "$COLOR_YELLOW" "$COLOR_RESET" \
+            "\"$target_dir\" not found; skipping." >&2
         return 0
     fi
 
-    info "$1 ($target_dir):"
+    case "$1" in
+        claude) target_label="Claude Code" ;;
+        codex) target_label="Codex" ;;
+    esac
+    target_banner "$target_dir" "$target_label"
 
     if test "$DRY_RUN" -eq 0 && test "$BACKUP" -eq 0; then
         case "$MODE" in
@@ -428,7 +544,7 @@ process_target() {
 
     if test "$MODE" = "install" && test ! -d "$target_skills_dir"; then
         if test "$DRY_RUN" -eq 1; then
-            info "  would create \"$target_skills_dir\""
+            status_plan "would create \"$target_skills_dir\""
         else
             mkdir -p "$target_skills_dir" \
                 || die "cannot create \"$target_skills_dir\""
@@ -499,22 +615,36 @@ test -n "$SKILL_LIST" || die "no skills found under \"$SKILLS_DIR\""
 
 test -n "$TARGETS" || TARGETS="$ALL_TARGETS"
 
+case "$MODE:$DRY_RUN" in
+    install:0) banner "Installing shared agent skills" ;;
+    install:1) banner "Previewing shared agent skill installation" ;;
+    check:*) banner "Checking shared agent skills" ;;
+    uninstall:0) banner "Uninstalling shared agent skills" ;;
+    uninstall:1) banner "Previewing shared agent skill removal" ;;
+esac
+
 for target in $TARGETS; do
     process_target "$target"
 done
 
 if test "$MODE" = "check"; then
     if test "$DRIFT" -eq 0; then
-        info "everything matches this repo."
+        summary_ok "Everything matches this repo."
     else
-        info "drift found; re-run \"$SCRIPT_NAME\" to reinstall."
+        summary_error "Drift found; re-run \"$SCRIPT_NAME\" to reinstall."
     fi
     exit "$DRIFT"
 fi
 
-if test "$MODE" = "install" && test "$DRY_RUN" -eq 0; then
-    info "done. Re-run this script after every change to the repo."
-    test "$BACKUP_MADE" -eq 1 && info "backup: \"$BACKUP_DIR\""
+if test "$DRY_RUN" -eq 1; then
+    summary_ok "Dry run complete — no changes made."
+elif test "$MODE" = "install"; then
+    summary_ok "Installation complete."
+    detail "Re-run this script after every change to the repo."
+    test "$BACKUP_MADE" -eq 1 && detail "backup: \"$BACKUP_DIR\""
+else
+    summary_ok "Uninstall complete."
+    test "$BACKUP_MADE" -eq 1 && detail "backup: \"$BACKUP_DIR\""
 fi
 
 exit 0

@@ -36,6 +36,8 @@ class IsolatedHome:
 
     def environment(self) -> dict[str, str]:
         environment = os.environ.copy()
+        environment.pop("NO_COLOR", None)
+        environment.pop("CLICOLOR_FORCE", None)
         environment["HOME"] = str(self.root)
         environment["CODEX_HOME"] = str(self.codex)
         return environment
@@ -53,11 +55,19 @@ class IsolatedHome:
                     f"legacy {skill}\n", encoding="utf-8"
                 )
 
-    def run(self, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def run(
+        self,
+        *arguments: str,
+        check: bool = True,
+        extra_environment: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        environment = self.environment()
+        if extra_environment is not None:
+            environment.update(extra_environment)
         return subprocess.run(
             [str(INSTALLER), *arguments],
             cwd=REPOSITORY,
-            env=self.environment(),
+            env=environment,
             check=check,
             capture_output=True,
             text=True,
@@ -104,7 +114,10 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(set(self.home.backups.iterdir()), backup_directories)
 
     def test_fresh_install_dry_run_and_uninstall(self) -> None:
-        self.home.run()
+        install = self.home.run()
+        self.assertIn("Installing shared agent skills", install.stdout)
+        self.assertIn("✓ Installation complete.", install.stdout)
+        self.assertNotIn("\x1b[", install.stdout)
         for target in (self.home.claude, self.home.codex):
             for skill in ACTIVE_SKILLS:
                 self.assertTrue((target / "skills" / skill / "SKILL.md").is_file())
@@ -121,6 +134,39 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse((target / "skills" / skill).exists())
             self.assertFalse((target / "CLAUDE.md").exists())
             self.assertFalse((target / "AGENTS.md").exists())
+
+    def test_color_can_be_forced_and_disabled(self) -> None:
+        colored = self.home.run(
+            "--dry-run", extra_environment={"CLICOLOR_FORCE": "1"}
+        )
+        self.assertIn("\x1b[", colored.stdout)
+        self.assertIn("✓ Dry run complete", colored.stdout)
+
+        plain = self.home.run(
+            "--dry-run",
+            extra_environment={"CLICOLOR_FORCE": "1", "NO_COLOR": "1"},
+        )
+        self.assertNotIn("\x1b[", plain.stdout)
+
+    def test_python_bytecode_is_ignored_and_cleaned(self) -> None:
+        self.home.run()
+
+        for target in (self.home.claude, self.home.codex):
+            scripts = target / "skills/task-workflow/scripts"
+            cache = scripts / "__pycache__"
+            cache.mkdir()
+            (cache / "plan_file.cpython-312.pyc").write_bytes(b"cache")
+            (scripts / "legacy.pyo").write_bytes(b"cache")
+
+        self.assertEqual(self.home.run("--check").returncode, 0)
+
+        reinstall = self.home.run()
+        self.assertIn("removed generated Python cache files", reinstall.stdout)
+        self.assertIn("backup:", reinstall.stdout)
+        for target in (self.home.claude, self.home.codex):
+            scripts = target / "skills/task-workflow/scripts"
+            self.assertFalse((scripts / "__pycache__").exists())
+            self.assertFalse((scripts / "legacy.pyo").exists())
 
 
 if __name__ == "__main__":
