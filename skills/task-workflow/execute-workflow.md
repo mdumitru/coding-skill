@@ -1,10 +1,11 @@
 # `execute:` Mode
 
-The text after the exact `execute:` keyword names a plan relative to `_plans/`.
-Resolve and validate it before modifying tracked files:
+The text after the exact `execute:` keyword is a lowercase kebab-case plan slug
+without an `.md` suffix or directory component. Resolve and validate it before
+modifying tracked files:
 
 ```sh
-python3 <task-workflow-dir>/scripts/plan_file.py validate <name>
+python3 <task-workflow-dir>/scripts/plan_file.py validate <slug>
 ```
 
 Stop on any helper error. Use the returned canonical `path` throughout the run;

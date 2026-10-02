@@ -121,23 +121,24 @@ def git_context(cwd: Path | None = None) -> GitContext:
 
 
 def resolve_plan(
-    name: str,
+    slug: str,
     *,
     cwd: Path | None = None,
     create_parent: bool = False,
 ) -> tuple[Path, GitContext]:
-    """Resolve a relative plan name without allowing escape from ``_plans``."""
+    """Resolve a plan slug to its Markdown file in the shared plan directory."""
 
-    requested = Path(name)
-    if not name.strip() or requested == Path("."):
-        raise PlanFileError("plan name must not be empty")
-    if requested.is_absolute():
-        raise PlanFileError("plan name must be relative to the shared _plans directory")
-    if ".." in requested.parts:
-        raise PlanFileError("plan name must not contain '..'")
+    if not slug.strip():
+        raise PlanFileError("plan slug must not be empty")
+    if slug.endswith(".md"):
+        raise PlanFileError("plan slug must omit the .md suffix")
+    if SLUG_RE.fullmatch(slug) is None:
+        raise PlanFileError(
+            "plan slug must be lowercase kebab-case and start with a letter"
+        )
 
     context = git_context(cwd)
-    candidate = (context.plan_root / requested).resolve()
+    candidate = (context.plan_root / f"{slug}.md").resolve()
     try:
         candidate.relative_to(context.plan_root)
     except ValueError as exc:
@@ -216,10 +217,10 @@ def _task_counts(lines: list[str]) -> TaskCounts:
     )
 
 
-def validate_plan(name: str, *, cwd: Path | None = None) -> ValidationResult:
+def validate_plan(slug: str, *, cwd: Path | None = None) -> ValidationResult:
     """Resolve and structurally validate one task-workflow plan."""
 
-    path, context = resolve_plan(name, cwd=cwd)
+    path, context = resolve_plan(slug, cwd=cwd)
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
@@ -242,7 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="operation", required=True)
 
     resolve_parser = subparsers.add_parser("resolve", help="print a canonical plan path")
-    resolve_parser.add_argument("name", help="relative plan name")
+    resolve_parser.add_argument("slug", help="plan slug without an .md suffix")
     resolve_parser.add_argument(
         "--create-parent",
         action="store_true",
@@ -257,7 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser = subparsers.add_parser(
         "validate", help="validate a plan and print JSON metadata"
     )
-    validate_parser.add_argument("name", help="relative plan name")
+    validate_parser.add_argument("slug", help="plan slug without an .md suffix")
     return parser
 
 
@@ -269,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.operation == "resolve":
             path, context = resolve_plan(
-                args.name,
+                args.slug,
                 create_parent=bool(args.create_parent),
             )
             if args.json:
@@ -283,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(path)
             return 0
 
-        result = validate_plan(args.name)
+        result = validate_plan(args.slug)
         print(json.dumps(asdict(result), sort_keys=True))
         return 0
     except PlanFileError as exc:

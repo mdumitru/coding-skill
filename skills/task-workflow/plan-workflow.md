@@ -6,11 +6,12 @@ produce a plan another agent can execute without repeating basic discovery.
 
 ## Resolve the plan
 
-Choose a concise `.md` name from the request unless the user supplied one. The
-name must be relative to `_plans/`. From the target repository, run:
+Choose a concise lowercase kebab-case slug from the request unless the user
+supplied one. Never include an `.md` suffix or any directory component. From
+the target repository, run:
 
 ```sh
-python3 <task-workflow-dir>/scripts/plan_file.py resolve <name> --create-parent --json
+python3 <task-workflow-dir>/scripts/plan_file.py resolve <slug> --create-parent --json
 ```
 
 Use the returned canonical `path` for every write and report. Do not derive a
@@ -34,10 +35,10 @@ Keep the artifact succinct but self-contained:
 - Include verification and documentation work in the relevant task or in a
   final task. Never include the plan file itself in a commit.
 
-After writing, validate the same relative name from the same Git context:
+After writing, validate the same slug from the same Git context:
 
 ```sh
-python3 <task-workflow-dir>/scripts/plan_file.py validate <name>
+python3 <task-workflow-dir>/scripts/plan_file.py validate <slug>
 ```
 
 Fix any validation error before reporting completion. Report the canonical

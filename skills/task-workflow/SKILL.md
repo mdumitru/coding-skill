@@ -14,7 +14,9 @@ Read exactly one mode reference completely before acting:
 - For `plan:`, read `plan-workflow.md`.
 - For `execute:`, read `execute-workflow.md`.
 
-Plan names are always relative to the repository's shared `_plans/` directory.
-Never accept an absolute plan path or search worktrees for another copy. The
-helper determines whether the Git context is a plain repository or a faur-git
-workspace and rejects path or symlink escapes.
+Plan arguments are always lowercase kebab-case slugs without an `.md` suffix.
+The helper maps a slug to `<plan-root>/_plans/<slug>.md`; never accept a path or
+search worktrees for another copy. It determines whether the Git context is a
+plain repository or a faur-git workspace and rejects path or symlink escapes.
+For example, `plan: improve-routing` and `execute: improve-routing` both refer
+to `_plans/improve-routing.md`.
