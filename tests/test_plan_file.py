@@ -363,6 +363,8 @@ class TypedPlanTests(unittest.TestCase):
         legacy = '# TODO: task\n- [ ] work\n  - Done when: done\n'
         with self.assertRaisesRegex(plan_file.PlanFileError, 'task-1 missing executable fields: Task, Commit, Paths, Verify'):
             plan_file.parse_plan(legacy, is_faur=False, runtime=True)
+        legacy_scope = legacy.replace('  - Done', '  - Paths: `old.py`, focused sibling files\n  - Done')
+        self.assertEqual(plan_file.parse_plan(legacy_scope, is_faur=False).tasks[0].paths, [])
         fields = '  - Task: change-input\n  - Commit: validate input\n  - Paths: ["src/*.py"]\n  - Verify: ["python3", "-m", "unittest"]\n'
         plan = plan_file.parse_plan(legacy.replace('  - Done', fields + '  - Done'), is_faur=False, runtime=True)
         self.assertEqual(plan.tasks[0].id, 'change-input')

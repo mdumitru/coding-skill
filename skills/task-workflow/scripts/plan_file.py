@@ -219,7 +219,9 @@ def parse_plan(content: str, *, is_faur: bool, runtime: bool = False) -> Plan:
         commit = fields.get('Commit', [None])[0]
         if commit is not None and (error := subject_error(commit)):
             raise PlanFileError(error)
-        paths = json_strings(fields['Paths'][0], 'Paths') if 'Paths' in fields else []
+        raw_paths = fields.get('Paths', [''])[0]
+        legacy_paths = raw_paths and not raw_paths.startswith('[') and 'Commit' not in fields and 'Verify' not in fields
+        paths = json_strings(raw_paths, 'Paths') if raw_paths and not legacy_paths else []
         if any(p.startswith('/') or '..' in Path(p).parts or '\\' in p for p in paths):
             raise PlanFileError('Paths must be relative patterns without parent traversal')
         verify = [json_strings(v, 'Verify') for v in fields.get('Verify', [])]
@@ -280,7 +282,9 @@ def set_identity(plan: Plan, worktree: str, launch_path: str, launch_branch: str
         if re.match(r'^(Worktree|Launch worktree|Launch branch):', visible[i]):
             del lines[i]
     title = next(i for i, line in enumerate(lines) if line.startswith('# TODO:'))
-    lines[title + 1:title + 1] = [f'\nWorktree: `{worktree}`\n', f'Launch worktree: `{launch_path}`\n', f'Launch branch: `{launch_branch}`\n']
+    while title + 1 < len(lines) and not lines[title + 1].strip():
+        del lines[title + 1]
+    lines[title + 1:title + 1] = [f'\nWorktree: `{worktree}`\n', f'Launch worktree: `{launch_path}`\n', f'Launch branch: `{launch_branch}`\n\n']
     return ''.join(lines)
 
 

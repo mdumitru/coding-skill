@@ -38,3 +38,27 @@ the helper. All mutations preserve unrelated text and use atomic replacement.
 External runtime records and exclusive per-plan locks live in `_plans/.state/`.
 A stale lock must be inspected using its PID; preserve evidence before explicit
 removal. Never automatically clear locks or overwrite drifted plans.
+
+# Startup and selection
+
+`workflow.py start <slug>` requires an executable plan. Plain repositories work
+in place. Faur startup probes `context --json` and a strict task preview before
+creation, then calls `add <slug> --task --unique --json`. Version 1 envelopes are
+required. Supply `--faur-argv '["/path/to/faur-worktree"]'` to use a companion CLI
+without installation; this argv prefix is recorded and must match on retries.
+The final JSON includes the returned canonical identity and immutable faur ID.
+Run subsequent commands from that task path.
+
+`--existing <name>` is explicit authorization to reuse a named worktree; launch
+location alone never implies reuse. Faur validates the requested context.
+`begin` selects the first pending task, requires the recorded clean branch/path,
+and journals its start HEAD. Repeating the same begin is safe.
+
+Startup journals its boundary before creation and persists the response before
+changing Markdown. A retry after response persistence reuses its immutable ID.
+If a process dies before the response is durable, startup refuses another add.
+Inspect faur's recorded context; `--recover-task-id <id>` explicitly identifies
+the interrupted task and verifies its requested slug and launch identity. If
+concurrent creation changed the preview name, preserve the journal and inspect
+it rather than guessing. Plan drift, stale/corrupt context, wrong branches, and
+old faur versions stop with diagnostics; state is retained for inspection.
