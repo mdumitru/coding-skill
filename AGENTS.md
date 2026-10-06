@@ -19,6 +19,7 @@ deterministic helpers and installer lifecycle.
 ./install.sh -t claude           # one harness only (repeatable)
 ./install.sh --uninstall
 python3 -m unittest             # helper and installer tests
+python3 scripts/lint_skills.py   # source-package preflight
 ```
 
 Verification for installer changes includes `python3 -m unittest`, then

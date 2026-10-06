@@ -657,6 +657,11 @@ done
 test -d "$SKILLS_DIR" || die "no skills directory at \"$SKILLS_DIR\""
 test -f "$INSTRUCTIONS_FILE" || die "no instructions file at \"$INSTRUCTIONS_FILE\""
 
+if test "$MODE" = "install"; then
+    python3 "$REPO_DIR/scripts/lint_skills.py" --root "$REPO_DIR" \
+        || die "source skill preflight failed; no targets were changed"
+fi
+
 SKILL_LIST=$(list_skills)
 test -n "$SKILL_LIST" || die "no skills found under \"$SKILLS_DIR\""
 
