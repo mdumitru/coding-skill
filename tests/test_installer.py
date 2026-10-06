@@ -171,3 +171,122 @@ class InstallerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class InstallerSafetyTests(unittest.TestCase):
+    setUp = InstallerTests.setUp
+    tearDown = InstallerTests.tearDown
+
+    def test_malformed_marker_preflight_is_non_mutating_in_all_modes(self) -> None:
+        begin = '<!-- BEGIN coding-skill -->\n'
+        end = '<!-- END coding-skill -->\n'
+        source = (REPOSITORY / 'shared/instructions.md').read_text()
+        malformed = [begin + source, end, end + begin, begin + begin + end + end, begin + end + begin + end, '  ' + begin + end]
+        for body in malformed:
+            for arguments in ((), ('--dry-run',), ('--uninstall',), ('--uninstall', '--dry-run'), ('--check',)):
+                with self.subTest(body=body[:40], arguments=arguments):
+                    target = self.home.codex / 'AGENTS.md'
+                    target.write_text(body)
+                    before = target.read_bytes()
+                    result = self.home.run(*arguments, check=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('malformed managed markers', result.stdout + result.stderr)
+                    self.assertEqual(target.read_bytes(), before)
+                    self.assertFalse((self.home.claude / 'skills').exists())
+                    self.assertFalse(self.home.backups.exists())
+
+    def test_refresh_and_uninstall_preserve_outside_content_and_mode(self) -> None:
+        target = self.home.claude / 'CLAUDE.md'
+        prefix = 'Personal notes\n\n\tKeep whitespace.\n'
+        suffix = '\nTrailing notes\n\n'
+        target.write_text(prefix + '<!-- BEGIN coding-skill -->\nold\n<!-- END coding-skill -->\n' + suffix)
+        target.chmod(0o640)
+        self.home.run()
+        expected = prefix + '<!-- BEGIN coding-skill -->\n' + (REPOSITORY / 'shared/instructions.md').read_text() + '<!-- END coding-skill -->\n' + suffix
+        self.assertEqual(target.read_text(), expected)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(self.home.run('--check').returncode, 0)
+        self.home.run('--uninstall')
+        self.assertEqual(target.read_text(), prefix + suffix)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+
+    def test_equal_skill_symlink_is_backed_up_and_replaced_without_touching_target(self) -> None:
+        import shutil
+        outside = self.home.root / 'outside-skill'
+        shutil.copytree(REPOSITORY / 'skills/agent-baseline', outside)
+        skills = self.home.claude / 'skills'
+        skills.mkdir()
+        link = skills / 'agent-baseline'
+        link.symlink_to(outside, target_is_directory=True)
+        source = (outside / 'SKILL.md').read_bytes()
+        self.assertNotEqual(self.home.run('--check', check=False).returncode, 0)
+        self.home.run('--dry-run')
+        self.assertTrue(link.is_symlink())
+        self.home.run()
+        self.assertFalse(link.is_symlink())
+        self.assertEqual((outside / 'SKILL.md').read_bytes(), source)
+        backups = list(self.home.backups.glob('*/.claude/skills/agent-baseline'))
+        self.assertEqual(len(backups), 1)
+        self.assertTrue(backups[0].is_symlink())
+        self.home.run('--check')
+
+    def test_unique_backups_for_same_timestamp_and_idempotence(self) -> None:
+        commands = self.home.root / 'commands'
+        commands.mkdir()
+        date = commands / 'date'
+        date.write_text('#!/bin/sh\nprintf "fixed-time\\n"\n')
+        date.chmod(0o755)
+        env = {'PATH': str(commands) + os.pathsep + os.environ['PATH']}
+        target = self.home.claude / 'CLAUDE.md'
+        for n in range(2):
+            target.write_text(f'unmanaged {n}\n')
+            self.home.run(extra_environment=env)
+        backups = list(self.home.backups.iterdir())
+        self.assertEqual(len(backups), 2)
+        bodies = {(p / '.claude/CLAUDE.md').read_text() for p in backups}
+        self.assertEqual(bodies, {'unmanaged 0\n', 'unmanaged 1\n'})
+        before = set(self.home.backups.iterdir())
+        second = self.home.run(extra_environment=env)
+        self.assertIn('up to date', second.stdout)
+        self.assertEqual(set(self.home.backups.iterdir()), before)
+
+    def test_replacement_failure_keeps_original_mode_backup_and_cleans_temp(self) -> None:
+        self.home.run()
+        target = self.home.claude / 'CLAUDE.md'
+        target.write_text('before\n<!-- BEGIN coding-skill -->\nold\n<!-- END coding-skill -->\nafter\n')
+        target.chmod(0o640)
+        before = target.read_bytes()
+        commands = self.home.root / 'commands'
+        commands.mkdir()
+        mv = commands / 'mv'
+        mv.write_text('#!/bin/sh\nexit 1\n')
+        mv.chmod(0o755)
+        result = self.home.run(check=False, extra_environment={'PATH': str(commands) + os.pathsep + os.environ['PATH']})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+        self.assertFalse(list(self.home.claude.glob('.coding-skill.*')))
+        backup = next(self.home.backups.glob('*/.claude/CLAUDE.md'))
+        self.assertEqual(backup.read_bytes(), before)
+
+    def test_generation_failure_and_signal_leave_original_and_remove_temporary(self) -> None:
+        self.home.run()
+        commands = self.home.root / 'commands'
+        commands.mkdir()
+        target = self.home.claude / 'CLAUDE.md'
+        before = b'unmanaged original\n'
+        cat = commands / 'cat'
+        cat.write_text('#!/bin/sh\nexit 1\n')
+        cat.chmod(0o755)
+        target.write_bytes(before)
+        result = self.home.run(check=False, extra_environment={'PATH': str(commands) + os.pathsep + os.environ['PATH']})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertFalse(list(self.home.claude.glob('.coding-skill.*')))
+        cat.unlink()
+        mv = commands / 'mv'
+        mv.write_text('#!/bin/sh\nkill -TERM "$PPID"\nexit 1\n')
+        mv.chmod(0o755)
+        result = self.home.run(check=False, extra_environment={'PATH': str(commands) + os.pathsep + os.environ['PATH']})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertFalse(list(self.home.claude.glob('.coding-skill.*')))

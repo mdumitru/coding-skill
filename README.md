@@ -122,3 +122,12 @@ it needs no edit.
 Removes the installed skill directories and strips the managed block, deleting
 the instructions file only if nothing else was left in it. Installed copies that
 had drifted from the repo are backed up before removal.
+
+Instruction markers must be absent or exactly one ordered begin/end pair on
+separate lines. Malformed, nested, or repeated markers refuse installation and
+uninstallation before any target changes; check reports them as drift. Managed
+replacement uses secure temporary files beside the destination and preserves
+existing file modes and outside text in the line-oriented Markdown format.
+Each modifying run allocates a unique backup directory, even within the same
+second. Installed skill-directory symlinks are backed up and replaced with real
+copies; their external targets are left intact.

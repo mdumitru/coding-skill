@@ -17,7 +17,11 @@ REPO_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 SKILLS_DIR="$REPO_DIR/skills"
 INSTRUCTIONS_FILE="$REPO_DIR/shared/instructions.md"
 BACKUP_ROOT="$HOME/coding-skill_backups"
-BACKUP_DIR="$BACKUP_ROOT/$(date '+%y%m%d_%H%M%S')"
+BACKUP_DIR=""
+BACKUP_LABEL=$(date '+%y%m%d_%H%M%S')
+CURRENT_TMP=""
+trap 'test -z "$CURRENT_TMP" || rm -f -- "$CURRENT_TMP"' 0
+trap 'exit 1' HUP INT TERM
 BEGIN_MARKER="<!-- BEGIN coding-skill -->"
 END_MARKER="<!-- END coding-skill -->"
 ALL_TARGETS="claude codex"
@@ -179,14 +183,16 @@ list_skills() {
 }
 
 ensure_backup_dir() {
-    test -d "$BACKUP_DIR" && return 0
-    mkdir -p "$BACKUP_DIR" || die "cannot create backup directory \"$BACKUP_DIR\""
+    test -n "$BACKUP_DIR" && return 0
+    mkdir -p "$BACKUP_ROOT" || die "cannot create backup root"
+    BACKUP_DIR=$(mktemp -d "$BACKUP_ROOT/$BACKUP_LABEL.XXXXXX") \
+        || die "cannot allocate unique backup directory"
 }
 
 # Copy a path into the timestamped backup directory, keeping its position
 # relative to $HOME. A no-op when the path does not exist.
 backup_path() {
-    test -e "$1" || return 0
+    test -e "$1" || test -L "$1" || return 0
 
     if test "$BACKUP" -eq 0; then
         detail "not backing up \"$1\" (-n given)"
@@ -194,7 +200,7 @@ backup_path() {
     fi
 
     backup_rel=${1#"$HOME"/}
-    backup_dst="$BACKUP_DIR/$backup_rel"
+    backup_dst="${BACKUP_DIR:-$BACKUP_ROOT/$BACKUP_LABEL.<unique>}/$backup_rel"
 
     if test "$DRY_RUN" -eq 1; then
         detail "would back up \"$1\" -> \"$backup_dst\""
@@ -202,6 +208,7 @@ backup_path() {
     fi
 
     ensure_backup_dir
+    backup_dst="$BACKUP_DIR/$backup_rel"
     mkdir -p "$(dirname -- "$backup_dst")" \
         || die "cannot create \"$(dirname -- "$backup_dst")\""
     cp -R -- "$1" "$backup_dst" || die "cannot back up \"$1\""
@@ -245,32 +252,65 @@ block_body() {
     ' "$1"
 }
 
+markers_valid() {
+    test -f "$1" || return 0
+    awk -v begin_marker="$BEGIN_MARKER" -v end_marker="$END_MARKER" '
+        index($0, begin_marker) {
+            if ($0 != begin_marker || state != 0) bad = 1
+            state = 1; begins++
+        }
+        index($0, end_marker) {
+            if ($0 != end_marker || state != 1) bad = 1
+            state = 2; ends++
+        }
+        END { exit (bad || begins != ends || begins > 1) ? 1 : 0 }
+    ' "$1"
+}
+
+prepare_replacement() {
+    CURRENT_TMP=$(mktemp "$(dirname -- "$1")/.coding-skill.XXXXXX") \
+        || die "cannot create secure replacement beside $1"
+    if test -f "$1"; then
+        cp -p -- "$1" "$CURRENT_TMP" || die "cannot preserve file mode for $1"
+    fi
+}
+
+publish_replacement() {
+    mv -- "$CURRENT_TMP" "$1" || die "cannot replace $1"
+    CURRENT_TMP=""
+}
+
 has_block() {
     grep -qxF -- "$BEGIN_MARKER" "$1" 2> /dev/null
 }
 
 block_is_current() {
     test -f "$1" || return 1
+    markers_valid "$1" || return 1
     has_block "$1" || return 1
     block_body "$1" | diff -q -- - "$INSTRUCTIONS_FILE" > /dev/null 2>&1
 }
 
 write_block_only() {
+    prepare_replacement "$1"
     {
         printf '%s\n' "$BEGIN_MARKER"
-        cat -- "$INSTRUCTIONS_FILE"
+        cat -- "$INSTRUCTIONS_FILE" || die "cannot read instructions source"
         printf '%s\n' "$END_MARKER"
-    } > "$1" || die "cannot write \"$1\""
+    } > "$CURRENT_TMP" || die "cannot generate instructions"
+    publish_replacement "$1"
 }
 
 replace_block() {
-    replace_tmp="${TMPDIR:-/tmp}/coding-skill.$$"
+    prepare_replacement "$1"
+    replace_tmp="$CURRENT_TMP"
     awk -v begin_marker="$BEGIN_MARKER" -v end_marker="$END_MARKER" \
         -v body_file="$INSTRUCTIONS_FILE" '
         $0 == begin_marker {
             in_block = 1
             print begin_marker
-            while ((getline body_line < body_file) > 0) print body_line
+            while ((body_status = getline body_line < body_file) > 0) print body_line
+            if (body_status < 0) exit 1
             close(body_file)
             print end_marker
             next
@@ -279,18 +319,19 @@ replace_block() {
         in_block         { next }
         { print }
     ' "$1" > "$replace_tmp" || die "cannot rewrite \"$1\""
-    mv -- "$replace_tmp" "$1" || die "cannot replace \"$1\""
+    publish_replacement "$1"
 }
 
 strip_block() {
-    strip_tmp="${TMPDIR:-/tmp}/coding-skill.$$"
+    prepare_replacement "$1"
+    strip_tmp="$CURRENT_TMP"
     awk -v begin_marker="$BEGIN_MARKER" -v end_marker="$END_MARKER" '
         $0 == begin_marker { in_block = 1; next }
         $0 == end_marker   { in_block = 0; next }
         in_block           { next }
         { print }
     ' "$1" > "$strip_tmp" || die "cannot rewrite \"$1\""
-    mv -- "$strip_tmp" "$1" || die "cannot replace \"$1\""
+    publish_replacement "$1"
 }
 
 file_is_blank() {
@@ -301,7 +342,7 @@ install_skill() {
     install_src="$SKILLS_DIR/$2"
     install_dst="$1/$2"
 
-    if trees_identical "$install_src" "$install_dst"; then
+    if test ! -L "$install_dst" && trees_identical "$install_src" "$install_dst"; then
         if has_generated_python_artifacts "$install_dst"; then
             if test "$DRY_RUN" -eq 1; then
                 status_plan "$2: would remove generated Python cache files"
@@ -443,6 +484,12 @@ check_instructions() {
         return 0
     fi
 
+    if ! markers_valid "$1"; then
+        status_error "$(basename -- "$1"): malformed managed markers"
+        DRIFT=1
+        return 0
+    fi
+
     if ! has_block "$1"; then
         status_error "$(basename -- "$1"): no managed block"
         DRIFT=1
@@ -459,7 +506,7 @@ check_instructions() {
 
 uninstall_skill() {
     uninstall_dst="$1/$2"
-    test -e "$uninstall_dst" || return 0
+    test -e "$uninstall_dst" || test -L "$uninstall_dst" || return 0
 
     if test "$DRY_RUN" -eq 1; then
         status_plan "$2: would remove \"$uninstall_dst\""
@@ -622,6 +669,15 @@ case "$MODE:$DRY_RUN" in
     uninstall:0) banner "Uninstalling shared agent skills" ;;
     uninstall:1) banner "Previewing shared agent skill removal" ;;
 esac
+
+# Validate every selected instructions file before any target mutation.
+if test "$MODE" != "check"; then
+    for preflight_target in $TARGETS; do
+        preflight_dir=$(target_home "$preflight_target")
+        preflight_file="$preflight_dir/$(target_instructions_name "$preflight_target")"
+        markers_valid "$preflight_file" || die "malformed managed markers in $preflight_file; repair the file before retrying"
+    done
+fi
 
 for target in $TARGETS; do
     process_target "$target"
