@@ -202,3 +202,149 @@ class RealFaurStartupTests(unittest.TestCase):
             begun = subprocess.run([*runner, 'begin', 'example'], cwd=task_path, capture_output=True, text=True)
             self.assertEqual(begun.returncode, 0, begun.stderr)
             self.assertEqual(json.loads(begun.stdout)['active']['task_id'], 'task-1')
+
+class CompletionTests(unittest.TestCase):
+    setUp = WorkflowTests.setUp
+    tearDown = WorkflowTests.tearDown
+
+    def start_begin(self) -> None:
+        workflow.start('example', runner=['unused'])
+        workflow.begin('example')
+
+    def test_ordered_completion_no_change_audit_and_report(self) -> None:
+        from completion import complete, audit, report
+        with working_directory(self.repo):
+            self.start_begin()
+            (self.repo / 'change.txt').write_text('task one\n')
+            state = complete('example')
+            self.assertEqual(len(state.records), 1)
+            first_head = workflow.git_output(self.repo, 'rev-parse', 'HEAD')
+            workflow.begin('example')
+            state = complete('example')
+            self.assertEqual(state.records[1]['outcome'], 'no-change')
+            self.assertEqual(workflow.git_output(self.repo, 'rev-parse', 'HEAD'), first_head)
+            self.assertEqual(audit('example').records, state.records)
+            facts = json.loads(report('example'))
+            self.assertFalse(facts['dirty'])
+            self.assertEqual(facts['pending'], [])
+            self.assertIn(first_head[:7], report('example', markdown=True))
+
+    def test_verification_failure_and_mutation_leave_task_pending(self) -> None:
+        from completion import complete
+        for command in ('raise SystemExit(3)', 'from pathlib import Path; Path("mutation.txt").write_text("mutation")'):
+            with self.subTest(command=command), working_directory(self.repo):
+                # Reset only the disposable execution journal between fixture variants.
+                state_file = self.plan.parent / '.state/example.json'
+                state_file.unlink(missing_ok=True)
+                self.plan.write_text(executable_plan(count=1).replace('print(123)', command.replace('"', '\\"')))
+                self.start_begin()
+                (self.repo / 'change.txt').write_text('change')
+                with self.assertRaisesRegex(StateError, 'verification'):
+                    complete('example')
+                state = workflow.load(self.plan)
+                self.assertIsNotNone(state.active.error)
+                self.assertIn('- [ ]', self.plan.read_text())
+                (self.repo / 'mutation.txt').unlink(missing_ok=True)
+                (self.repo / 'change.txt').unlink()
+
+    def test_unauthorized_deletion_rename_partial_staging_and_forbidden_paths(self) -> None:
+        from completion import complete
+        with working_directory(self.repo):
+            self.start_begin()
+            (self.repo / 'unrelated.py').write_text('bad')
+            with self.assertRaisesRegex(StateError, 'unauthorized'):
+                complete('example')
+            (self.repo / 'unrelated.py').unlink()
+            (self.repo / 'initial.txt').write_text('staged')
+            run_git('add', 'initial.txt', cwd=self.repo)
+            (self.repo / 'initial.txt').write_text('partial')
+            with self.assertRaisesRegex(StateError, 'partial staging'):
+                complete('example')
+            run_git('reset', '--hard', '-q', 'HEAD', cwd=self.repo)
+            run_git('mv', 'initial.txt', 'renamed.txt', cwd=self.repo)
+            state = complete('example')
+            self.assertTrue(state.records[0]['outcome'])
+            self.assertFalse((self.repo / 'initial.txt').exists())
+            self.assertTrue((self.repo / 'renamed.txt').exists())
+            workflow.begin('example')
+            (self.repo / 'TODO-work.md').write_text('tracking')
+            run_git('add', '-f', 'TODO-work.md', cwd=self.repo)
+            with self.assertRaisesRegex(StateError, 'unauthorized'):
+                complete('example')
+
+    def test_failed_commit_retains_staging_and_recovers_once(self) -> None:
+        from completion import complete
+        with working_directory(self.repo):
+            self.start_begin()
+            hook = self.repo / '.git/hooks/pre-commit'
+            hook.write_text('#!/bin/sh\nexit 1\n')
+            hook.chmod(0o755)
+            (self.repo / 'change.txt').write_text('task\n')
+            with self.assertRaisesRegex(StateError, 'commit failed'):
+                complete('example')
+            self.assertEqual(workflow.load(self.plan).active.phase, 'committing')
+            self.assertTrue(workflow.git_output(self.repo, 'diff', '--cached', '--name-only'))
+            hook.unlink()
+            state = complete('example')
+            self.assertEqual(len(state.records), 1)
+            self.assertIsNone(state.active)
+
+    def test_crash_after_git_commit_and_after_markdown_replacement(self) -> None:
+        import completion
+        with working_directory(self.repo):
+            self.start_begin()
+            (self.repo / 'change.txt').write_text('task\n')
+            real_save = workflow.save
+            def crash(plan: Path, state: workflow.Execution) -> None:
+                if state.active and state.active.phase == 'committed':
+                    raise OSError('crash after Git commit')
+                real_save(plan, state)
+            with patch('workflow.save', side_effect=crash), self.assertRaises(OSError):
+                completion.complete('example')
+            committed = workflow.git_output(self.repo, 'rev-parse', 'HEAD')
+            state = completion.complete('example')
+            self.assertEqual(state.records[0]['outcome'], committed)
+            self.assertEqual(workflow.git_output(self.repo, 'rev-parse', 'HEAD'), committed)
+            workflow.begin('example')
+            # No-change task: fail the final state write after Markdown succeeds.
+            def final_crash(plan: Path, state: workflow.Execution) -> None:
+                if state.active is None:
+                    raise OSError('crash after Markdown update')
+                real_save(plan, state)
+            with patch('workflow.save', side_effect=final_crash), self.assertRaises(OSError):
+                completion.complete('example')
+            state = completion.complete('example')
+            self.assertEqual(state.records[1]['outcome'], 'no-change')
+            completion.audit('example')
+
+    def test_plan_drift_and_rewritten_history_fail_audit(self) -> None:
+        from completion import complete, audit
+        with working_directory(self.repo):
+            self.plan.write_text(executable_plan(count=1))
+            self.start_begin()
+            (self.repo / 'change.txt').write_text('task\n')
+            complete('example')
+            content = self.plan.read_text()
+            self.plan.write_text(content + '\nDrift\n')
+            with self.assertRaisesRegex(StateError, 'drift'):
+                audit('example')
+            self.plan.write_text(content)
+            run_git('reset', '--hard', '-q', 'HEAD^', cwd=self.repo)
+            with self.assertRaisesRegex(StateError, 'ancestry'):
+                audit('example')
+
+    def test_checkboxes_without_evidence_never_start_or_audit(self) -> None:
+        with working_directory(self.repo):
+            self.plan.write_text(executable_plan(count=1).replace('- [ ]', '- [x]'))
+            with self.assertRaisesRegex(StateError, 'Evidence'):
+                workflow.start('example', runner=['unused'])
+
+    def test_unauthorized_verification_mutation_is_preserved(self) -> None:
+        from completion import complete
+        with working_directory(self.repo):
+            self.plan.write_text(executable_plan(count=1).replace('print(123)', 'from pathlib import Path; Path(\"bad.py\").touch()'.replace('"', '\\"')))
+            self.start_begin()
+            with self.assertRaisesRegex(StateError, 'unauthorized'):
+                complete('example')
+            self.assertTrue((self.repo / 'bad.py').exists())
+            self.assertFalse(workflow.read_plan(self.plan, workflow.git_context()).tasks[0].completed)

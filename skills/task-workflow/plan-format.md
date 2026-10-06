@@ -62,3 +62,30 @@ the interrupted task and verifies its requested slug and launch identity. If
 concurrent creation changed the preview name, preserve the journal and inspect
 it rather than guessing. Plan drift, stale/corrupt context, wrong branches, and
 old faur versions stop with diagnostics; state is retained for inspection.
+
+# Completion, recovery, audit, and reporting
+
+`workflow.py complete <slug>` checks every changed/staged path, refuses partial
+staging, and runs each Verify array from the recorded worktree without a shell.
+The agent must first judge the Done when condition semantically. Verification
+records include argv, exit status, bounded output, and a full-output digest.
+Unexpected verification mutations stop completion and remain available for
+review. Only allowed changes are staged. Commit intent records start HEAD and
+expected tree before Git runs; retries reconcile the one matching commit.
+Failed commits retain staging and diagnostics. No-change tasks need successful
+verification and record `no-change`, keeping HEAD intact.
+
+Both the commit and Markdown replacement are journaled. Re-run `complete` after
+an interrupted transaction; it verifies identity, tree, subject, and ancestry
+before finalizing. Drift is refused, never repaired by discarding user edits.
+Do not reset state to bypass a failure. Locks and journal files are evidence.
+Checked legacy tasks can be adopted at startup only with full commit Outcome
+and Evidence matching the executable Verify commands; the helper verifies
+commit subject, paths, and ancestry. Bare checkboxes are insufficient.
+
+`audit` requires ordered evidence for every task, matching Markdown records,
+a contiguous commit chain ending at HEAD, no active transaction, and a clean
+recorded worktree. `report` emits JSON facts with actual branch/path, refreshed
+identity, commits, pending tasks, and dirty state; `--markdown` is concise.
+Neither command integrates or removes worktrees. Live skill installation and
+publishing remain separate explicitly requested actions.

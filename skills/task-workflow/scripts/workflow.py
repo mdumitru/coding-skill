@@ -209,6 +209,12 @@ def start(slug: str, *, runner: list[str], existing: str | None = None, recover_
                     reused = run_faur(runner, Path.cwd(), 'context', existing, '--json')
                     state.identity = context_identity(reused, common)
                     state.response = reused
+                    if state.identity.task_id is None and plan.launch_worktree:
+                        legacy_launch = run_faur(runner, Path(plan.launch_worktree), 'context', '--json')
+                        checked = context_identity(legacy_launch, common)
+                        if checked.path != plan.launch_worktree or checked.branch != plan.launch_branch:
+                            raise StateError('legacy launch metadata disagrees with faur context')
+                        state.launch = object_value(legacy_launch.get('worktree'), 'legacy launch')
                     state.phase = 'created'
                 else:
                     # Dry-run proves task capability and lets faur select the preview identity.
@@ -269,6 +275,8 @@ def start(slug: str, *, runner: list[str], existing: str | None = None, recover_
             save(path, state)
             if plan.content != content:
                 plan = replace_plan(path, context, plan, content)
+        from completion import import_completed
+        state.records = import_completed(Path(state.identity.path), plan)
         state.plan_digest = plan.digest
         state.pending_digest = None
         state.phase = 'ready'
@@ -323,10 +331,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.operation == 'begin':
             state = begin(args.slug)
         else:
-            raise StateError(f'{args.operation} transaction is not yet available')
+            from completion import complete, audit, report
+            if args.operation == 'report':
+                print(report(args.slug, markdown=args.markdown))
+                return 0
+            state = complete(args.slug) if args.operation == 'complete' else audit(args.slug)
         print(json.dumps(asdict(state), sort_keys=True))
         return 0
-    except (PlanFileError, StateError, OSError, ValueError) as exc:
+    except (PlanFileError, StateError, OSError, ValueError, subprocess.CalledProcessError) as exc:
         LOGGER.error('%s', exc)
         return 2
 
