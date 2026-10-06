@@ -91,3 +91,22 @@ Whenever committing, follow these rules exactly:
 - Do not add a commit body unless the user explicitly requests one.
 - Never add attribution or certification trailers, including `Signed-off-by`,
   `Co-Authored-By`, or tool-generated attribution.
+
+## Deterministic commit checks
+
+Resolve `scripts/commit_policy.py` from this skill directory and run:
+
+```sh
+python3 <skill-dir>/scripts/commit_policy.py message --file <message-file>
+python3 <skill-dir>/scripts/commit_policy.py paths --repo <repository>
+```
+
+These commands read only. Paths checks reject `_plans/` components and known
+TODO Markdown filenames, including force-staged files. Repeat `--forbid` for
+additional repository patterns. Imperative mood and whether an arbitrarily
+named document tracks TODO work still require agent judgment. `--allow-body`
+implements the explicitly authorized body exception; attribution/certification
+trailers remain forbidden. Optional hooks may invoke these commands, but never
+install or replace hooks without an explicit instruction. Task-workflow carries
+its own identical guard to remain independent of sibling installed skills;
+contract tests keep the copies aligned.

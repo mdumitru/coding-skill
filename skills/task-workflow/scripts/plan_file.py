@@ -15,6 +15,7 @@ from pathlib import Path
 # Permit direct execution and importlib loading without another installed skill.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from state_io import StateError, atomic_write, plan_lock
+from policy import subject_error
 
 LOGGER = logging.getLogger('plan-file')
 SLUG_RE = re.compile(r'^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$')
@@ -135,20 +136,6 @@ def visible_lines(content: str) -> list[str]:
         else:
             result.append('' if fence else line)
     return result
-
-
-def subject_error(subject: str, *, allow_body: bool = False) -> str | None:
-    """Mechanical policy only; imperative mood remains a semantic decision."""
-    lines = subject.rstrip('\n').splitlines()
-    if not lines or not re.match(r'^[a-z]', lines[0]) or len(lines[0]) > 80:
-        return 'commit subject must start with a lowercase letter and be at most 80 characters'
-    if any(re.match(r'^\s*(?:signed-off-by|co-authored-by|generated[- ](?:with|by)|.*-by):', line, re.I) for line in lines):
-        return 'attribution/certification trailers are forbidden'
-    if not allow_body and len(lines) != 1:
-        return 'commit message must contain one subject and no body/trailers'
-    if not lines[0].strip() or lines[0] != lines[0].strip():
-        return 'commit subject must not have surrounding whitespace'
-    return None
 
 
 def json_strings(raw: str, field: str) -> list[str]:
