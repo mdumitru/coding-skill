@@ -1,57 +1,78 @@
 # `execute:` Mode
 
-The text after the exact `execute:` keyword is a lowercase kebab-case plan slug
-without an `.md` suffix or directory component. Resolve and validate it before
-modifying tracked files:
+The text after the exact keyword is a lowercase kebab-case plan slug, without
+an extension or directory. Read `plan-format.md` for grammar and recovery.
+Resolve helpers by absolute path within this skill, retaining that path after
+changing directories. Never search for a fallback plan or derive task paths.
+
+## Start or resume
+
+From the target repository, run:
 
 ```sh
-python3 <task-workflow-dir>/scripts/plan_file.py validate <slug>
+python3 <task-workflow-dir>/scripts/workflow.py start <slug>
 ```
 
-Stop on any helper error. Use the returned canonical `path` throughout the run;
-never search a worktree for a fallback plan.
+The runner validates executable metadata, locks the canonical external plan,
+and delegates faur identity and strict unique task creation to faur. It updates
+Worktree/Launch fields atomically using faur's response. Plain repositories work
+in place. Use the returned identity path for all subsequent work. For an
+existing run, call start from its recorded task path; interrupted startup may
+require its recorded origin as described in the diagnostic.
 
-## Establish the working location
-
-If `faur` is false, work in the current plain repository. The plan must not
-contain worktree metadata.
-
-If `faur` is true, read the `worktree-workflow` skill before changing tracked
-files. Before creating anything:
-
-1. Run `faur worktrees --json` and identify the entry whose canonical `path`
-   contains the current working directory. Require a present path and a named
-   branch; do not guess for detached, missing, or ambiguous entries.
-2. Record or replace these top-level fields in the external plan, using the
-   exact canonical values from that entry:
-
-   ```markdown
-   Launch worktree: `/absolute/path`
-   Launch branch: `branch-name`
-   ```
-
-3. Follow `worktree-workflow` to reconcile any collision for the validated
-   `worktree` slug and create it from the recorded branch. If the slug changes,
-   update the plan's `Worktree:` field and validate it again before creation.
-
-The plan stays at its canonical external path. All tracked edits, tests, and
-commits happen in the created task worktree.
+An old faur version is a blocker: relay the diagnostic. When explicitly using
+a companion project, supply `--faur-argv` as a JSON executable argv prefix;
+it is recorded for all later calls. Use `--existing <name>` only when the user
+explicitly authorized that existing worktree, or when adopting this same task's
+already-created worktree during an authorized workflow migration. Never infer
+reuse from launch location. Legacy plans can be migrated with
+`scripts/plan_file.py init <slug> --migrate`; add the missing executable content
+before startup and validate with `--runtime`. Checked legacy tasks require
+real commit Outcomes and matching verification Evidence for adoption.
 
 ## Execute one task at a time
 
-For each unchecked task in order:
+```sh
+python3 <task-workflow-dir>/scripts/workflow.py begin <slug>
+python3 <task-workflow-dir>/scripts/plan_file.py next <slug> --runtime
+```
 
-1. Implement only that task and verify its `Done when:` condition.
-2. If it is ambiguous or has materially different viable solutions, stop and
-   ask the user. After the answer, first record the decision and new context in
-   the external plan, then resume.
-3. Mark the task `[x]` only after its completion condition succeeds.
-4. Commit that task's tracked changes using the baseline commit conventions.
-   Never stage or commit the plan.
+Begin chooses the next task in order, checks the clean recorded identity, and
+journals start HEAD. Implement that task within its allowed Paths. Evaluate
+its Done when condition semantically. If materially ambiguous, stop and ask;
+preserve the journal, put the approved decision in scratch Markdown, and call
+`workflow.py revise <slug> --content <scratch-file>` before resuming. Revisions
+preserve stable IDs/order, identity, checked state, and completed evidence.
+Do not bypass drift checks or discard diagnostic state.
 
-If a verification fails or a task cannot be completed, leave it unchecked,
-preserve diagnostic state, and report the failure. After the last task, run the
-plan validation once more, perform any final repository checks specified by the
-plan, and report the completed work and commits. In faur-git, stop without
-integrating or removing the task worktree; only a later explicit `finish` or
-`finish in <branch>` message authorizes that lifecycle step.
+After semantic acceptance, run:
+
+```sh
+python3 <task-workflow-dir>/scripts/workflow.py complete <slug>
+```
+
+The helper checks paths/message policy, executes Verify argv arrays without a
+shell, detects verification mutations and partial staging, stages only allowed
+changes, commits once, and writes progress with evidence. It handles verified
+no-change outcomes. Do not pre-mark checkboxes, stage the plan, or manually
+commit runner-managed tasks. On a failure, preserve pending state and relay
+its diagnostic. Retry complete to reconcile a journaled matching commit after
+an interruption; never reset state to manufacture a clean run.
+
+## Final checks and report
+
+After all tasks, run:
+
+```sh
+python3 <task-workflow-dir>/scripts/plan_file.py validate <slug> --runtime
+python3 <task-workflow-dir>/scripts/workflow.py audit <slug>
+python3 <task-workflow-dir>/scripts/workflow.py report <slug> --markdown
+```
+
+Run any additional final repository checks required by the plan. Audit requires
+successful ordered evidence, intact commit ancestry, clean matching identity,
+and no unresolved transaction. Report the canonical path, branch, and actual
+commits from recorded facts. Stop without pushing, integrating, or removing
+the task. Only a later exact `finish` or `finish in <branch>` authorizes finish;
+a PR still requires a separate explicit request. Do not install into live
+harnesses as part of verification.

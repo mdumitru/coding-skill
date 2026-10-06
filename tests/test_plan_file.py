@@ -411,3 +411,14 @@ class TypedPlanTests(unittest.TestCase):
         self.assertEqual((root / '_plans/example.md').read_bytes(), original)
         selected = subprocess.run([sys.executable, str(HELPER), 'next', 'example'], cwd=root, capture_output=True, text=True)
         self.assertEqual(json.loads(selected.stdout)['id'], 'task-1')
+
+class StableIdTests(unittest.TestCase):
+    def test_mixed_legacy_and_explicit_ids_are_unique_and_malformed_ids_fail(self) -> None:
+        content = '# TODO: fixture\n- [ ] legacy\n  - Done when: accepted\n- [ ] explicit\n  - Task: task-1\n  - Done when: accepted\n'
+        plan = plan_file.parse_plan(content, is_faur=False)
+        self.assertEqual([task.id for task in plan.tasks], ['task-2', 'task-1'])
+        migrated = plan_file.parse_plan(plan_file.migrate_ids(plan), is_faur=False)
+        self.assertEqual([task.id for task in migrated.tasks], ['task-2', 'task-1'])
+        for malformed in ('`task-1', 'task-1`', '``task-1``'):
+            with self.assertRaisesRegex(plan_file.PlanFileError, 'malformed Task ID'):
+                plan_file.parse_plan(content.replace('Task: task-1', f'Task: {malformed}'), is_faur=False)

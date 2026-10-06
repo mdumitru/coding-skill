@@ -180,6 +180,7 @@ def parse_plan(content: str, *, is_faur: bool, runtime: bool = False) -> Plan:
         raise PlanFileError('Launch worktree must be an absolute path')
     if not starts:
         raise PlanFileError('plan must contain at least one checkbox task')
+    reserved_ids = {match[1].strip('`') for line in lines if (match := re.fullmatch(r'  - Task:\s*(.*)', line))}
     tasks: list[Task] = []
     consumed: set[int] = set()
     for n, start in enumerate(starts):
@@ -200,7 +201,18 @@ def parse_plan(content: str, *, is_faur: bool, runtime: bool = False) -> Plan:
         for key, values in fields.items():
             if key not in {'Verify', 'Evidence'} and len(values) != 1:
                 raise PlanFileError(f'duplicate {key} on task line {start + 1}')
-        task_id = fields.get('Task', [f'task-{n + 1}'])[0].strip('`')
+        if 'Task' in fields:
+            raw_id = fields['Task'][0]
+            match_id = re.fullmatch(r'(?:`([a-z][a-z0-9-]*)`|([a-z][a-z0-9-]*))', raw_id)
+            if match_id is None:
+                raise PlanFileError(f'malformed Task ID: {raw_id}')
+            task_id = match_id[1] or match_id[2]
+        else:
+            candidate = n + 1
+            task_id = f'task-{candidate}'
+            while task_id in reserved_ids or any(t.id == task_id for t in tasks):
+                candidate += 1
+                task_id = f'task-{candidate}'
         if not SLUG_RE.fullmatch(task_id) or any(t.id == task_id for t in tasks):
             raise PlanFileError(f'invalid or duplicate Task ID: {task_id}')
         commit = fields.get('Commit', [None])[0]
@@ -276,7 +288,7 @@ def set_identity(plan: Plan, worktree: str, launch_path: str, launch_branch: str
 
 
 def mark_complete(plan: Plan, task_id: str, *, outcome: str, evidence: list[dict[str, object]]) -> str:
-    if not evidence or any(e.get('exit_code') != 0 or not e.get('argv') for e in evidence):
+    if not evidence or any(type(e.get('exit_code')) is not int or e.get('exit_code') != 0 or not e.get('argv') for e in evidence):
         raise PlanFileError('completion requires successful verification evidence')
     if outcome != 'no-change' and not HASH_RE.fullmatch(outcome):
         raise PlanFileError('completion requires a full commit hash or verified no-change outcome')

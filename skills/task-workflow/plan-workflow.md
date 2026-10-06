@@ -1,46 +1,35 @@
 # `plan:` Mode
 
-Planning may inspect the repository but must not modify tracked files, create a
-worktree, or make a commit. Investigate enough of the request and repository to
-produce a plan another agent can execute without repeating basic discovery.
+Planning inspects the target repository and creates only an external readable
+plan. It must not change tracked files, create a worktree, or commit. Read
+`plan-format.md`; investigate enough for another agent to execute the content.
 
-## Resolve the plan
-
-Choose a concise lowercase kebab-case slug from the request unless the user
-supplied one. Never include an `.md` suffix or any directory component. From
-the target repository, run:
+Choose the user's lowercase kebab-case slug or a short descriptive one. Resolve
+the canonical location from the target repository:
 
 ```sh
 python3 <task-workflow-dir>/scripts/plan_file.py resolve <slug> --create-parent --json
 ```
 
-Use the returned canonical `path` for every write and report. Do not derive a
-second location yourself. The helper uses `<workspace>/_plans/` beside `.bare/`
-for faur-git and `<git-root>/_plans/` for a plain repository.
+Prepare UTF-8 Markdown content in a scratch file outside the repository. Include
+a `# TODO:` title, relevant context and settled decisions, one top-level
+Worktree slug for faur layouts, and ordered top-level unchecked tasks. Do not
+record launch identity yourself; startup consumes faur's returned identity.
+Every task needs a stable Task ID, imperative Commit subject, explicit JSON
+Paths patterns, one or more nonempty JSON Verify argv arrays, and a subordinate
+Done when condition. All executable metadata uses exactly two-space bullet
+indentation. Keep task details and acceptance meaningful; helper validation
+checks the mechanical format. Never include TODO/plan artifacts in commit paths.
 
-## Write and validate the plan
-
-Keep the artifact succinct but self-contained:
-
-- Start with a descriptive `# TODO:` title and relevant repository context or
-  settled decisions.
-- If `faur` is true, add exactly one top-level `Worktree:` field whose value is
-  a short lowercase kebab-case slug. Do not add that field when `faur` is false.
-- Use `- [ ]` for every executable task. Organize details beneath the task as
-  ordinary bullets, not additional checkboxes unless they are independently
-  executable tasks.
-- Give every checkbox task a subordinate `Done when:` bullet stating an
-  observable completion condition. The helper checks syntax; the agent remains
-  responsible for making the condition meaningful.
-- Include verification and documentation work in the relevant task or in a
-  final task. Never include the plan file itself in a commit.
-
-After writing, validate the same slug from the same Git context:
+Create and validate without overwriting existing plans:
 
 ```sh
-python3 <task-workflow-dir>/scripts/plan_file.py validate <slug>
+python3 <task-workflow-dir>/scripts/plan_file.py init <slug> --content <scratch-file>
+python3 <task-workflow-dir>/scripts/plan_file.py validate <slug> --runtime
 ```
 
-Fix any validation error before reporting completion. Report the canonical
-path from the JSON output. In faur-git, the later `execute:` run records its
-actual launch worktree and branch before creating the task worktree.
+Init supplies IDs for legacy content lacking them, preserves prose, and refuses
+an existing destination. Report the canonical path returned by the helper.
+Structural validate remains available for old readable plans, but execute
+requires the documented executable metadata. Planning never installs tools or
+skills, pushes, opens a PR, or integrates/removes a worktree.

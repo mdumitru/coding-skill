@@ -21,6 +21,7 @@ class Changes:
     staged: list[str]
     unstaged: list[str]
     fingerprint: str
+    content_digest: str = ''
 
 
 def git_bytes(path: Path, *args: str) -> bytes:
@@ -29,6 +30,22 @@ def git_bytes(path: Path, *args: str) -> bytes:
 
 def names(data: bytes) -> list[str]:
     return [p.decode('utf-8', 'surrogateescape') for p in data.split(b'\0') if p]
+
+
+def content_digest(path: Path, paths: list[str]) -> str:
+    digest = hashlib.sha256()
+    for name in paths:
+        file = path / name
+        digest.update(os.fsencode(name))
+        if file.is_symlink():
+            digest.update(b'link' + os.fsencode(os.readlink(file)))
+        elif file.is_file():
+            digest.update(b'file' + str(file.stat().st_mode & 0o111).encode() + file.read_bytes())
+        elif not file.exists():
+            digest.update(b'deleted')
+        else:
+            raise StateError(f'unsupported changed object: {name}')
+    return digest.hexdigest()
 
 
 def inspect(path: Path) -> Changes:
@@ -48,7 +65,8 @@ def inspect(path: Path) -> Changes:
             digest.update(str(file.stat().st_mode).encode())
         else:
             raise StateError(f'unsupported untracked object: {name}')
-    return Changes(sorted(set(staged + unstaged + untracked)), sorted(staged), sorted(unstaged), digest.hexdigest())
+    changed_paths = sorted(set(staged + unstaged + untracked))
+    return Changes(changed_paths, sorted(staged), sorted(unstaged), digest.hexdigest(), content_digest(path, changed_paths))
 
 
 def guard(changes: Changes, task: Task) -> None:
@@ -62,7 +80,7 @@ def guard(changes: Changes, task: Task) -> None:
 
 def evidence_valid(task: Task, evidence: object) -> bool:
     return (isinstance(evidence, list) and len(evidence) == len(task.verify)
-            and all(isinstance(item, dict) and item.get('exit_code') == 0 and item.get('argv') == argv
+            and all(isinstance(item, dict) and type(item.get('exit_code')) is int and item.get('exit_code') == 0 and item.get('argv') == argv
                     for item, argv in zip(evidence, task.verify)))
 
 
@@ -95,7 +113,7 @@ def record_valid(path: Path, task: Task, record: dict[str, object]) -> None:
     if subprocess.run(['git', 'merge-base', '--is-ancestor', end_head, 'HEAD'], cwd=path, capture_output=True).returncode:
         raise StateError(f'task {task.id} commit ancestry was rewritten')
     if outcome == 'no-change':
-        if record.get('start_head') != end_head:
+        if record.get('start_head') != end_head or record.get('tree') != git_output(path, 'rev-parse', f'{end_head}^{{tree}}'):
             raise StateError('no-change outcome does not match its recorded start HEAD')
     elif isinstance(outcome, str):
         facts = commit_facts(path, outcome)
@@ -255,7 +273,7 @@ def complete(slug: str) -> object:
                     subprocess.run(['git', 'add', '--all', '--', *to_stage], cwd=worktree, check=True, capture_output=True)
                 staged = inspect(worktree)
                 guard(staged, task)
-                if staged.unstaged or staged.paths != changes.paths or staged.staged != changes.paths:
+                if staged.unstaged or staged.paths != changes.paths or staged.staged != changes.paths or staged.content_digest != changes.content_digest:
                     raise StateError('changes drifted or staging is incomplete')
                 active.tree = git_output(worktree, 'write-tree')
                 active.changes = changes.paths

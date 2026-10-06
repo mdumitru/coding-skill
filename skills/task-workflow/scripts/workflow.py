@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from plan_file import (GitContext, Plan, PlanFileError, Task, git_context, git_output,
-                       json_strings, read_plan, replace_plan, resolve_plan, set_identity)
+                       json_strings, parse_plan, read_plan, replace_plan, resolve_plan, set_identity)
 from state_io import StateError, atomic_write, plan_lock
 
 LOGGER = logging.getLogger('workflow')
@@ -57,6 +57,7 @@ class Execution:
     requested_slug: str | None = None
     preview: dict[str, object] | None = None
     pending_digest: str | None = None
+    revision: str | None = None
 
 
 def object_value(value: object, description: str) -> dict[str, object]:
@@ -88,7 +89,7 @@ def save(plan: Path, state: Execution) -> None:
 def load(plan: Path) -> Execution:
     try:
         data = object_value(json.loads(state_path(plan).read_text()), 'execution state')
-        if data.get('schema_version') != 1 or data.get('plan_path') != str(plan):
+        if type(data.get('schema_version')) is not int or data.get('schema_version') != 1 or data.get('plan_path') != str(plan):
             raise StateError('unsupported or mismatching execution state identity')
         identity = Identity(**object_value(data.pop('identity'), 'identity')) if data.get('identity') is not None else data.pop('identity', None)
         active = ActiveTask(**object_value(data.pop('active'), 'active task')) if data.get('active') is not None else data.pop('active', None)
@@ -97,6 +98,20 @@ def load(plan: Path) -> Execution:
             raise StateError('invalid recorded argv runner')
         if not isinstance(state.records, list) or any(not isinstance(x, dict) for x in state.records):
             raise StateError('invalid task records')
+        for label, value in [('common_dir', state.common_dir), ('plan_digest', state.plan_digest), ('phase', state.phase), ('origin', state.origin)]:
+            string_value(value, label)
+        if state.phase not in {'prepared', 'creating', 'created', 'ready', 'revising'}:
+            raise StateError('unknown execution phase')
+        if state.identity:
+            for label, value in [('path', state.identity.path), ('branch', state.identity.branch), ('identity common_dir', state.identity.common_dir)]:
+                string_value(value, label)
+        if state.active:
+            if state.active.phase not in {'begun', 'committing', 'committed', 'no-change'}:
+                raise StateError('unknown active transaction phase')
+            string_value(state.active.task_id, 'active task ID')
+            string_value(state.active.start_head, 'active start HEAD')
+            if not isinstance(state.active.evidence, list) or not isinstance(state.active.changes, list) or any(not isinstance(x, str) for x in state.active.changes):
+                raise StateError('invalid active evidence/paths')
         return state
     except (OSError, ValueError, TypeError) as exc:
         raise StateError(f'cannot read execution state: {exc}') from exc
@@ -153,7 +168,10 @@ def created_identity(data: dict[str, object], common: str) -> Identity:
 def plain_identity(context: GitContext, cwd: Path) -> Identity:
     root = Path(git_output(cwd, 'rev-parse', '--show-toplevel')).resolve()
     branch = git_output(root, 'symbolic-ref', '--quiet', '--short', 'HEAD')
-    return Identity(str(root), branch, str(context.common_dir))
+    actual = git_context(root)
+    if actual.common_dir != context.common_dir:
+        raise StateError('plain worktree belongs to a different repository')
+    return Identity(str(root), branch, str(actual.common_dir))
 
 
 def check_identity(state: Execution, context: GitContext, *, require_cwd: bool = True) -> Path:
@@ -228,6 +246,10 @@ def start(slug: str, *, runner: list[str], existing: str | None = None, recover_
                 state.identity = plain_identity(context, Path.cwd())
                 state.phase = 'created'
             save(path, state)
+        if state.phase == 'creating' and state.response is not None:
+            state.identity = created_identity(state.response, common)
+            state.phase = 'created'
+            save(path, state)
         if state.phase == 'creating':
             # No second add: an unacknowledged subprocess may already have succeeded.
             if not recover_task_id:
@@ -254,6 +276,7 @@ def start(slug: str, *, runner: list[str], existing: str | None = None, recover_
             save(path, state)
             response = run_faur(runner, Path.cwd(), 'add', str(state.requested_slug), '--task', '--unique', '--json')
             state.response = response
+            save(path, state)  # Preserve acknowledgement even if validation fails.
             state.identity = created_identity(response, common)
             state.phase = 'created'
             save(path, state)
@@ -307,16 +330,69 @@ def begin(slug: str) -> Execution:
         return state
 
 
+def revise(slug: str, content_path: Path | None) -> Execution:
+    """Record an approved pending-task decision without losing runtime evidence."""
+    path, context = resolve_plan(slug)
+    with plan_lock(path):
+        previous = read_plan(path, context, runtime=True)
+        state = load(path)
+        check_identity(state, context)
+        if state.phase == 'revising':
+            if state.revision is None or state.pending_digest is None:
+                raise StateError('incomplete revision journal')
+            content = state.revision
+            if content_path and content_path.read_text() != content:
+                raise StateError('revision retry content differs from journal')
+            if previous.digest not in {state.plan_digest, state.pending_digest}:
+                raise StateError('plan drift during revision')
+        else:
+            if state.phase != 'ready' or previous.digest != state.plan_digest or state.pending_digest:
+                raise StateError('revision requires a matching ready plan')
+            if state.active and state.active.phase != 'begun':
+                raise StateError('finish active completion recovery before revising')
+            if content_path is None:
+                raise StateError('revision requires --content with approved Markdown')
+            content = content_path.read_text(encoding='utf-8')
+            proposed = parse_plan(content, is_faur=context.is_faur, runtime=True)
+            if (proposed.worktree, proposed.launch_worktree, proposed.launch_branch) != (previous.worktree, previous.launch_worktree, previous.launch_branch):
+                raise StateError('revision must preserve worktree identity')
+            if [t.id for t in proposed.tasks] != [t.id for t in previous.tasks]:
+                raise StateError('revision must preserve stable task IDs and order')
+            for old, new in zip(previous.tasks, proposed.tasks):
+                if old.completed != new.completed:
+                    raise StateError('revision cannot change checked state')
+                old_fields = {k: v for k, v in asdict(old).items() if k not in {'line', 'end'}}
+                new_fields = {k: v for k, v in asdict(new).items() if k not in {'line', 'end'}}
+                if old.completed and old_fields != new_fields:
+                    raise StateError('revision cannot change completed task evidence/content')
+            state.revision = content
+            state.pending_digest = proposed.digest
+            state.phase = 'revising'
+            save(path, state)
+        if previous.content != content:
+            updated = replace_plan(path, context, previous, content)
+        else:
+            updated = previous
+        state.plan_digest = updated.digest
+        state.phase = 'ready'
+        state.pending_digest = None
+        state.revision = None
+        save(path, state)
+        return state
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='operation', required=True)
-    for name in ('start', 'begin', 'complete', 'audit', 'report'):
+    for name in ('start', 'begin', 'complete', 'audit', 'report', 'revise'):
         p = sub.add_parser(name)
         p.add_argument('slug')
         if name == 'start':
             p.add_argument('--faur-argv', default='["faur", "worktree"]', help='JSON executable argv prefix')
             p.add_argument('--existing', help='explicitly authorized existing faur worktree name')
             p.add_argument('--recover-task-id', help='explicit immutable ID for unacknowledged creation recovery')
+        if name == 'revise':
+            p.add_argument('--content', type=Path)
         if name == 'report':
             p.add_argument('--markdown', action='store_true')
     return parser
@@ -328,6 +404,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.operation == 'start':
             state = start(args.slug, runner=json_strings(args.faur_argv, 'faur argv'), existing=args.existing, recover_task_id=args.recover_task_id)
+        elif args.operation == 'revise':
+            state = revise(args.slug, args.content)
         elif args.operation == 'begin':
             state = begin(args.slug)
         else:

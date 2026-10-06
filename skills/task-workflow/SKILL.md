@@ -6,7 +6,8 @@ description: Use only when the user's message contains the exact keyword `plan:`
 # Task Workflow
 
 This skill gives `plan:` and `execute:` one deterministic plan location and
-format. Invoke `scripts/plan_file.py` by its absolute path resolved from this
+format. Read `plan-format.md` for the typed grammar and recovery. Invoke
+`scripts/workflow.py` for execution and `scripts/plan_file.py` by its absolute path resolved from this
 skill directory; keep using that same script after changing working directory.
 
 Read exactly one mode reference completely before acting:

@@ -13,12 +13,14 @@ worktree, including an existing task worktree. Its location never authorizes
 doing a new task there: the launch worktree is for reading and later
 integration only.
 
-Before modifying any tracked file, use `faur worktrees --json` to resolve the
-launch path, branch, and slug collisions, then create a worktree with `faur
-worktree add <slug> --base <launch-branch>`. Use the returned task path for
-every edit, command, and commit. One task, one worktree, however small the
-change. Read the `worktree-workflow` skill for the lifecycle and the
-`task-workflow` skill for `plan:`/`execute:` behavior.
+Before modifying any tracked file in a faur workspace, read the
+`worktree-workflow` skill. For ordinary changes, use `faur worktree context
+--json`, then `faur worktree add <slug> --task --unique --json`. Faur resolves
+context, chooses a free slug, and stores launch/task identity. Use the returned
+canonical task path for every edit, command, and commit. For `execute:`, the
+`task-workflow` runner calls faur and journals plan progress, verification,
+and commits; do not create another worktree or mark checkboxes by hand.
+One request, one task worktree, however small the change.
 
 Exceptions: read-only tasks (including `plan:`), repos that are not faur
 workspaces, and an explicit instruction to work "here" or in a named existing
@@ -26,7 +28,7 @@ worktree. Being launched from a non-main or task worktree is not an exception.
 Never push, open a PR, integrate, or remove a worktree unless I ask. After a
 task is complete, only a new message exactly saying `finish` or `finish in
 <branch>` authorizes the `faur worktree finish` workflow documented by the
-`worktree-workflow` skill. That command verifies integration before removing
+`worktree-workflow` skill. Faur uses its recorded launch destination and verifies integration before removing
 the worktree and deleting its local task branch; it leaves remote branches
 untouched.
 

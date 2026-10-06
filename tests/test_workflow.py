@@ -348,3 +348,162 @@ class CompletionTests(unittest.TestCase):
                 complete('example')
             self.assertTrue((self.repo / 'bad.py').exists())
             self.assertFalse(workflow.read_plan(self.plan, workflow.git_context()).tasks[0].completed)
+
+class ProducerConsumerLifecycleTests(unittest.TestCase):
+    def test_real_complete_audit_new_process_finish_and_retained_evidence(self) -> None:
+        raw = os.environ.get('FAUR_WORKTREE_ARGV')
+        if not raw:
+            self.skipTest('set FAUR_WORKTREE_ARGV to enable the real companion lifecycle')
+        faur = json.loads(raw)
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace, launch = RepositoryFixture(Path(temporary)).faur()
+            (workspace / '.bare/info/exclude').write_text('_plans/\n')
+            run_git('config', 'user.name', 'Lifecycle Tests', cwd=launch)
+            run_git('config', 'user.email', 'test@example.invalid', cwd=launch)
+            plan = workspace / '_plans/example.md'
+            plan.parent.mkdir()
+            plan.write_text(executable_plan(faur=True, count=1))
+            runner = [sys.executable, str(SCRIPTS / 'workflow.py')]
+            def command(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+                result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                return result
+            created = json.loads(command([*runner, 'start', 'example', '--faur-argv', raw], launch).stdout)
+            task = Path(created['identity']['path'])
+            task_id = created['identity']['task_id']
+            command([*runner, 'begin', 'example'], task)
+            (task / 'result.txt').write_text('verified task result\n')
+            completed = json.loads(command([*runner, 'complete', 'example'], task).stdout)
+            commit = completed['records'][0]['outcome']
+            command([*runner, 'audit', 'example'], task)
+            resumed = json.loads(command([*runner, 'start', 'example', '--faur-argv', raw], task).stdout)
+            self.assertEqual(resumed['records'][0]['outcome'], commit)
+            report = json.loads(command([*runner, 'report', 'example'], task).stdout)
+            self.assertEqual(report['identity']['task_id'], task_id)
+            third = workspace / 'third'
+            run_git('worktree', 'add', '-qb', 'third', str(third), cwd=launch)
+            command([*faur, 'finish', 'example', '--dry-run'], third)
+            self.assertTrue(task.is_dir())
+            command([*faur, 'finish', 'example'], third)
+            self.assertFalse(task.exists())
+            self.assertEqual((launch / 'result.txt').read_text(), 'verified task result\n')
+            self.assertNotEqual(subprocess.run(['git', 'show-ref', '--verify', '--quiet', 'refs/heads/example'], cwd=launch).returncode, 0)
+            self.assertIn(commit, plan.read_text())
+            self.assertIn('"exit_code": 0', plan.read_text())
+            archived = list((workspace / '.bare/faur/task-state').rglob(f'{task_id}.json'))
+            self.assertEqual(len(archived), 1)
+            record = json.loads(archived[0].read_text())
+            self.assertEqual(record['launch']['path'], str(launch))
+            self.assertTrue(record['branch_deleted'])
+
+    def test_installed_runner_lifecycles_in_both_harnesses(self) -> None:
+        from tests.test_installer import IsolatedHome
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = IsolatedHome(root / 'home')
+            home.root.mkdir()
+            home.initialize_targets()
+            home.run('--dry-run')
+            home.run()
+            home.run('--check')
+            for target in (home.claude, home.codex):
+                repo = root / target.name
+                repo.mkdir()
+                run_git('init', '-q', cwd=repo)
+                run_git('config', 'user.name', 'Copied Helpers', cwd=repo)
+                run_git('config', 'user.email', 'test@example.invalid', cwd=repo)
+                (repo / '.gitignore').write_text('_plans/\n')
+                run_git('add', '.', cwd=repo)
+                run_git('commit', '-qm', 'create fixture', cwd=repo)
+                scripts = target / 'skills/task-workflow/scripts'
+                content = root / 'content.md'
+                content.write_text(executable_plan(count=1))
+                commands = [[str(scripts / 'plan_file.py'), 'init', 'example', '--content', str(content)],
+                            [str(scripts / 'workflow.py'), 'start', 'example'],
+                            [str(scripts / 'workflow.py'), 'begin', 'example']]
+                for argv in commands:
+                    result = subprocess.run([sys.executable, *argv], cwd=repo, env={**os.environ, 'PYTHONPATH': '', 'PYTHONDONTWRITEBYTECODE': '1'}, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                (repo / 'result.txt').write_text('copied workflow\n')
+                for operation in ('complete', 'audit', 'report'):
+                    result = subprocess.run([sys.executable, str(scripts / 'workflow.py'), operation, 'example'], cwd=repo, env={**os.environ, 'PYTHONPATH': '', 'PYTHONDONTWRITEBYTECODE': '1'}, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            before = set(home.backups.glob('*'))
+            second = home.run()
+            self.assertIn('up to date', second.stdout)
+            self.assertEqual(set(home.backups.glob('*')), before)
+            home.run('--check')
+            home.run('--uninstall', '--dry-run')
+            home.run('--uninstall')
+
+class FinalRecoveryTests(unittest.TestCase):
+    setUp = WorkflowTests.setUp
+    tearDown = WorkflowTests.tearDown
+    start_begin = CompletionTests.start_begin
+
+    def test_approved_revision_preserves_progress_and_recovers_atomically(self) -> None:
+        with working_directory(self.repo):
+            self.start_begin()
+            source = self.root / 'revision.md'
+            source.write_text(self.plan.read_text().replace('acceptance holds', 'approved acceptance holds') + '\nApproved decision: retain the existing format.\n')
+            with patch('workflow.replace_plan', side_effect=OSError('replacement interrupted')):
+                with self.assertRaises(OSError):
+                    workflow.revise('example', source)
+            state = workflow.revise('example', None)
+            self.assertEqual(state.phase, 'ready')
+            self.assertEqual(state.active.task_id, 'task-1')
+            self.assertIn('Approved decision', self.plan.read_text())
+            source.write_text(self.plan.read_text().replace('- [ ]', '- [x]', 1))
+            with self.assertRaisesRegex(StateError, 'checked state'):
+                workflow.revise('example', source)
+
+    def test_revision_cannot_change_completed_task_records(self) -> None:
+        from completion import complete
+        with working_directory(self.repo):
+            self.start_begin()
+            complete('example')
+            source = self.root / 'revision.md'
+            source.write_text(self.plan.read_text().replace('implement task 1', 'rewrite task 1'))
+            with self.assertRaisesRegex(StateError, 'completed task'):
+                workflow.revise('example', source)
+
+    def test_staging_race_preserves_changed_work_without_committing(self) -> None:
+        import completion
+        with working_directory(self.repo):
+            self.start_begin()
+            file = self.repo / 'change.txt'
+            file.write_text('verified content\n')
+            initial = workflow.git_output(self.repo, 'rev-parse', 'HEAD')
+            original_run = subprocess.run
+            def racing_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if argv[:3] == ['git', 'add', '--all']:
+                    file.write_text('concurrent edit\n')
+                return original_run(argv, **kwargs)
+            with patch('completion.subprocess.run', side_effect=racing_run):
+                with self.assertRaisesRegex(StateError, 'drifted'):
+                    completion.complete('example')
+            self.assertEqual(file.read_text(), 'concurrent edit\n')
+            self.assertEqual(workflow.git_output(self.repo, 'rev-parse', 'HEAD'), initial)
+
+    def test_committed_transaction_retries_failed_plan_replacement_once(self) -> None:
+        import completion
+        with working_directory(self.repo):
+            self.start_begin()
+            (self.repo / 'change.txt').write_text('task\n')
+            with patch('completion.replace_plan', side_effect=OSError('plan replacement failed')):
+                with self.assertRaises(OSError):
+                    completion.complete('example')
+            committed = workflow.git_output(self.repo, 'rev-parse', 'HEAD')
+            state = completion.complete('example')
+            self.assertEqual(state.records[0]['outcome'], committed)
+            self.assertEqual(workflow.git_output(self.repo, 'rev-parse', 'HEAD'), committed)
+
+    def test_corrupt_execution_state_is_actionable(self) -> None:
+        with working_directory(self.repo):
+            self.start_begin()
+            path = workflow.state_path(self.plan)
+            data = json.loads(path.read_text())
+            data['active']['phase'] = 'unknown'
+            path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(StateError, 'unknown active'):
+                workflow.load(self.plan)

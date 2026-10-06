@@ -89,3 +89,10 @@ recorded worktree. `report` emits JSON facts with actual branch/path, refreshed
 identity, commits, pending tasks, and dirty state; `--markdown` is concise.
 Neither command integrates or removes worktrees. Live skill installation and
 publishing remain separate explicitly requested actions.
+
+Approved changes to pending-task details or decision prose use
+`workflow.py revise <slug> --content <scratch-file>` while the plan matches its
+recorded state. Revision preserves identity, task IDs/order, checked state, and
+completed-task records. It refuses a completion transaction in progress and
+journals its own replacement. Retry `revise <slug>` without --content to finish
+an interrupted approved revision; it never adopts unrelated drift.
