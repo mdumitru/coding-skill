@@ -9,8 +9,8 @@ Skills here:
 | Skill | Trigger |
 | --- | --- |
 | `agent-baseline` | always on: succinct replies, robust typed Python, commit style |
-| `worktree-workflow` | isolate changes in a [faur-git](https://github.com/faur-ai/faur-git) task worktree, then explicitly `finish` them into an integration worktree |
-| `task-workflow` | a message containing the exact keyword `plan:` or `execute:` |
+| `worktree-workflow` | isolate changes in a [faur-git](https://github.com/faur-ai/faur-git) task worktree, then explicitly `finish` them into an integration worktree after tearing down its previews |
+| `task-workflow` | a message containing the exact keyword `plan:`, `execute:`, or `run:` |
 
 ## Install
 
@@ -172,3 +172,36 @@ The environment variable enables real disposable producer/consumer integration
 tests; without it those optional tests are reported as skipped. They never
 install a live tool or finish a user task worktree. Commit policy can also run
 explicitly from agent-baseline's helper; it does not install repository hooks.
+
+## Repository previews
+
+`run: example` previews the recorded task worktree of plan `example` at
+exactly `example.localhost`, even when faur named the worktree `example-2`.
+`execute: example` with a bare `run:` records the preview intent first and
+starts the preview only after the execution's final audit; retries reuse it.
+A run never creates a worktree, commits, or changes plan checkboxes, so it can
+preview uncommitted edits.
+
+A repository opts in with real executables in  `worktree-tools/`: `start`,
+`status`, `logs`, `stop`, and `reset` plus `worktree-tools/protocol.json`
+(schema version, adapter kind, optional declared start options and pairing
+group). The executables own dependencies, ports, configuration, data,
+processes, and cleanup; the skills stay generic. Repository start options
+follow `--`:
+
+```sh
+python3 skills/task-workflow/scripts/preview.py run example -- --example-option value
+python3 skills/task-workflow/scripts/preview.py stop example --teardown
+```
+
+Runtime records live in the workspace `_runs/` (plain repositories: an ignored
+`.worktree-runs/`); a machine-level registry under
+`$XDG_STATE_HOME/coding-skill/preview-hostnames` rejects two independent
+runtimes on one hostname. `stop` keeps restartable data, `stop --teardown`
+deletes owned resources, and `reset` recreates fresh state.
+
+An exact `finish` or `finish in <branch>` goes through
+`skills/worktree-workflow/scripts/finish.py`: faur context, faur dry-run,
+owned preview teardown, then the real faur finish. Dry-run never tears down;
+any teardown failure blocks the real finish and keeps the worktree and its
+recovery state. PR and finish authorization are otherwise unchanged.

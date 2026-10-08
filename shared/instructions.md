@@ -1,9 +1,12 @@
 # User Instructions
 
 Baseline working conventions (succinct replies, robust Python, commit style)
-are in the always-on `agent-baseline` skill. The exact `plan:` and `execute:`
-keywords (including their trailing colons) trigger the matching mode of the
-`task-workflow` skill. Source repo: `~/gits/coding-skill`.
+are in the always-on `agent-baseline` skill. The exact `plan:`, `execute:`,
+and `run:` keywords (including their trailing colons) trigger the matching mode
+of the `task-workflow` skill. `run: <slug>` previews that plan's recorded task
+worktree at exactly `<slug>.localhost`; a bare `run:` is valid only beside one
+`execute: <slug>`, and then starts the preview after the execution is audited.
+Source repo: `~/gits/coding-skill`.
 
 ## Worktrees
 
@@ -27,10 +30,13 @@ workspaces, and an explicit instruction to work "here" or in a named existing
 worktree. Being launched from a non-main or task worktree is not an exception.
 Never push, open a PR, integrate, or remove a worktree unless I ask. After a
 task is complete, only a new message exactly saying `finish` or `finish in
-<branch>` authorizes the `faur worktree finish` workflow documented by the
-`worktree-workflow` skill. Faur uses its recorded launch destination and verifies integration before removing
-the worktree and deleting its local task branch; it leaves remote branches
-untouched.
+<branch>` authorizes the finish workflow documented by the `worktree-workflow`
+skill: its wrapper runs faur's dry-run, tears down the task's repository
+previews, and only then runs `faur worktree finish`. A teardown failure blocks
+finish and keeps the worktree. Faur uses its recorded launch destination and
+verifies integration before removing the worktree and deleting its local task
+branch; it leaves remote branches untouched. A run request never creates a
+worktree, commits, or authorizes finish or a PR.
 
 At any point, warn me clearly about conflicts, failures, ambiguous state, or
 anything else that did not go smoothly or requires my attention.

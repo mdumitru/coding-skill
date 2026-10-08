@@ -59,6 +59,15 @@ commit runner-managed tasks. On a failure, preserve pending state and relay
 its diagnostic. Retry complete to reconcile a journaled matching commit after
 an interruption; never reset state to manufacture a clean run.
 
+## Combined `run:` requests
+
+When the same request also contains `run:` (bare or naming this slug), read
+`run-workflow.md`, record the preview intent with `preview.py intent
+--execute-slug <slug>` before start, and keep it through retries. Only after
+the final audit below passes, start the preview with `preview.py run
+--execute-slug <slug>` and report its URLs. A conflicting run slug or several
+execute slugs stop the request before any work.
+
 ## Final checks and report
 
 After all tasks, run:

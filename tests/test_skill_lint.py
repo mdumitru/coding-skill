@@ -120,3 +120,41 @@ class SkillLintTests(unittest.TestCase):
             guard = target / 'skills/agent-baseline/scripts/commit_policy.py'
             result = subprocess.run([sys.executable, str(guard), 'message', '--message', 'validate copied helper'], cwd=repo, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class RoutingContractTests(unittest.TestCase):
+    """Skill descriptions and managed instructions agree; preview skills stay generic."""
+
+    @staticmethod
+    def description(skill: str) -> str:
+        lines = (REPOSITORY / 'skills' / skill / 'SKILL.md').read_text().splitlines()
+        return next(line.removeprefix('description: ') for line in lines if line.startswith('description: '))
+
+    def test_run_trigger_and_combined_mode_agree(self) -> None:
+        instructions = (REPOSITORY / 'shared/instructions.md').read_text()
+        task = self.description('task-workflow')
+        for keyword in ('`plan:`', '`execute:`', '`run:`'):
+            self.assertIn(keyword, task)
+            self.assertIn(keyword, instructions)
+        self.assertIn('beside one\n`execute: <slug>`', instructions)
+        self.assertIn('<slug>.localhost', instructions)
+        run = (REPOSITORY / 'skills/task-workflow/run-workflow.md').read_text()
+        self.assertIn('preview.py intent --execute-slug', run)
+        self.assertIn('run-workflow.md', (REPOSITORY / 'skills/task-workflow/execute-workflow.md').read_text())
+
+    def test_finish_teardown_routing_agrees(self) -> None:
+        instructions = (REPOSITORY / 'shared/instructions.md').read_text()
+        self.assertIn('previews', self.description('worktree-workflow'))
+        self.assertIn('tears down the task\'s repository\npreviews', instructions)
+        for name in ('SKILL.md', 'worktree-workflow.md'):
+            self.assertIn('scripts/finish.py', (REPOSITORY / 'skills/worktree-workflow' / name).read_text())
+
+    def test_preview_skills_contain_no_application_specific_knowledge(self) -> None:
+        import re
+        forbidden = re.compile(r'(?i)\b(docker|compose|postgres(?:ql)?|mysql|redis|sqlite|npm|yarn|node(?:js)?|django|rails|flask|vite|'
+                               r'webpack|kubernetes|kubectl|aws|gcp|azure|supabase|stripe|heroku)\b|localhost:\d|/home/|/Users/')
+        for skill in ('task-workflow', 'worktree-workflow'):
+            for file in sorted((REPOSITORY / 'skills' / skill).rglob('*')):
+                if file.is_file() and file.suffix in {'.md', '.py'}:
+                    with self.subTest(file=file.name):
+                        self.assertIsNone(forbidden.search(file.read_text()))

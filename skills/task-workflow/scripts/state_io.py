@@ -42,20 +42,28 @@ def atomic_write(path: Path, content: str, *, exclusive: bool = False) -> None:
 
 
 @contextmanager
+def exclusive_lock(lock: Path, description: str, **facts: str) -> Iterator[None]:
+    """Hold an O_EXCL lock file; a leftover lock is evidence, never auto-cleared."""
+    if lock.is_symlink():
+        raise StateError(f'refusing symlink lock: {lock}')
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise StateError(f'{description} is locked: {lock}; inspect its PID and preserve evidence before removing a stale lock') from exc
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            json.dump({'pid': os.getpid(), **facts}, stream, sort_keys=True)
+        yield
+    finally:
+        lock.unlink()
+
+
+@contextmanager
 def plan_lock(plan: Path) -> Iterator[None]:
     """Refuse concurrent writers; leave stale lock evidence for manual review."""
     directory = plan.parent / '.state'
     if directory.is_symlink() or not directory.resolve().is_relative_to(plan.parent):
         raise StateError('state directory escapes the plan root')
     directory.mkdir(exist_ok=True)
-    lock = directory / f'{plan.stem}.lock'
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
-        raise StateError(f'plan is locked: {lock}; inspect its PID and preserve evidence before removing a stale lock') from exc
-    try:
-        with os.fdopen(fd, 'w') as stream:
-            json.dump({'pid': os.getpid(), 'plan': str(plan)}, stream, sort_keys=True)
+    with exclusive_lock(directory / f'{plan.stem}.lock', 'plan', plan=str(plan)):
         yield
-    finally:
-        lock.unlink()

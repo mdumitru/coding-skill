@@ -338,8 +338,10 @@ def report(slug: str, *, markdown: bool = False) -> str:
         plan = read_plan(path, context)
         state = runtime.load(path)
         worktree = runtime.check_identity(state, context, require_cwd=False)
-        facts = {'plan': str(path), 'phase': state.phase, 'identity': asdict(state.identity), 'head': git_output(worktree, 'rev-parse', 'HEAD'), 'dirty': not runtime.clean(worktree), 'pending': [t.id for t in plan.tasks if not t.completed], 'active': asdict(state.active) if state.active else None, 'records': state.records}
+        from preview import load_intent
+        intent = load_intent(path)
+        facts = {'run_intent': intent['phase'] if intent else None, 'plan': str(path), 'phase': state.phase, 'identity': asdict(state.identity), 'head': git_output(worktree, 'rev-parse', 'HEAD'), 'dirty': not runtime.clean(worktree), 'pending': [t.id for t in plan.tasks if not t.completed], 'active': asdict(state.active) if state.active else None, 'records': state.records}
         if markdown:
             commits = ', '.join(str(r['outcome'])[:7] for r in state.records if r.get('outcome') != 'no-change') or 'none'
-            return f'Worktree: {worktree} (branch {state.identity.branch}).\nCommits: {commits}. Pending tasks: {len(facts["pending"])}. Dirty: {facts["dirty"]}.\n'
+            return f'Worktree: {worktree} (branch {state.identity.branch}).\nCommits: {commits}. Pending tasks: {len(facts["pending"])}. Dirty: {facts["dirty"]}.\n' + (f'Run intent: {facts["run_intent"]}.\n' if intent else '')
         return json.dumps(facts, sort_keys=True)

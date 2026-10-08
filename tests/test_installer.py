@@ -290,3 +290,117 @@ class InstallerSafetyTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(target.read_bytes(), before)
         self.assertFalse(list(self.home.claude.glob('.coding-skill.*')))
+
+
+class InstalledPreviewTests(unittest.TestCase):
+    """Copied preview and finish helpers work with the source tree deleted."""
+
+    def test_copied_helpers_run_without_source_or_sibling_imports(self) -> None:
+        import json
+        import shutil
+        import sys
+        from tests.test_plan_file import RepositoryFixture, run_git
+        from tests.test_preview_finish import FAKE_FAUR
+        from tests.test_preview_workflow import install_tools
+        from tests.test_workflow import executable_plan
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "source"
+            shutil.copytree(REPOSITORY, source, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
+            home = IsolatedHome(root / "home")
+            home.root.mkdir()
+            home.initialize_targets()
+
+            def installer(*arguments: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run([str(source / "install.sh"), *arguments], cwd=source, env=home.environment(), check=True, capture_output=True, text=True)
+
+            installer("--dry-run")
+            self.assertFalse((home.claude / "skills").exists())
+            installer()
+            installer("--check")
+            backups = set(home.backups.glob("*"))
+            self.assertIn("up to date", installer().stdout)
+            self.assertEqual(set(home.backups.glob("*")), backups)
+            installer("--check")
+            shutil.rmtree(source)
+
+            for target in (home.claude, home.codex):
+                with self.subTest(target=target.name):
+                    for skill in ("task-workflow", "worktree-workflow"):
+                        for file in (target / "skills" / skill).rglob("*"):
+                            if file.is_file():
+                                self.assertNotIn(str(REPOSITORY), file.read_text(errors="replace"))
+                    task_scripts = target / "skills/task-workflow/scripts"
+                    finish = target / "skills/worktree-workflow/scripts/finish.py"
+                    work = root / target.name
+                    work.mkdir()
+                    environment = {**os.environ, "HOME": str(home.root), "XDG_STATE_HOME": str(work / "xdg"), "PYTHONPATH": "",
+                                   "PYTHONDONTWRITEBYTECODE": "1", "FAKE_PREVIEW_MODE": ""}
+
+                    def helper(script: Path, *arguments: str, cwd: Path) -> dict[str, object]:
+                        result = subprocess.run([sys.executable, "-I", str(script), *arguments], cwd=cwd, env=environment, capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        return json.loads(result.stdout.splitlines()[-1]) if result.stdout.strip().startswith("{") else {"text": result.stdout}
+
+                    # Plain repository: preview lifecycle in place.
+                    (work / "plain-root").mkdir()
+                    repo = RepositoryFixture(work / "plain-root").plain()
+                    run_git("config", "user.name", "Installed Helpers", cwd=repo)
+                    run_git("config", "user.email", "test@example.invalid", cwd=repo)
+                    (repo / ".gitignore").write_text("_plans/\n__pycache__/\n")
+                    install_tools(repo)
+                    run_git("add", ".", cwd=repo)
+                    run_git("commit", "-qm", "create fixture", cwd=repo)
+                    content = work / "plan.md"
+                    content.write_text(executable_plan(count=1))
+                    helper(task_scripts / "plan_file.py", "init", "example", "--content", str(content), cwd=repo)
+                    helper(task_scripts / "workflow.py", "start", "example", cwd=repo)
+                    started = helper(task_scripts / "preview.py", "run", "example", "--", "--seed", "copied", cwd=repo)
+                    self.assertEqual((started["hostname"], started["details"]["start_args"]), ("example.localhost", ["--seed", "copied"]))
+                    self.assertEqual(helper(task_scripts / "preview.py", "status", "example", cwd=repo)["status"], "running")
+                    self.assertEqual(helper(task_scripts / "preview.py", "logs", "example", "--lines", "2", cwd=repo)["text"], "line 2\nline 3\n")
+                    self.assertEqual(helper(task_scripts / "preview.py", "stop", "example", "--teardown", cwd=repo)["phase"], "torn-down")
+                    self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout, "")
+
+                    # Faur workspace: suffixed task, preview from launch, finish wrapper teardown.
+                    (work / "faur-root").mkdir()
+                    workspace, launch = RepositoryFixture(work / "faur-root").faur()
+                    run_git("config", "user.name", "Installed Helpers", cwd=launch)
+                    run_git("config", "user.email", "test@example.invalid", cwd=launch)
+                    (launch / ".gitignore").write_text("__pycache__/\n")
+                    install_tools(launch)
+                    run_git("add", ".", cwd=launch)
+                    run_git("commit", "-qm", "add tools", cwd=launch)
+                    (workspace / "_plans").mkdir()
+                    (workspace / "_plans/example.md").write_text(executable_plan(faur=True, count=1))
+                    task = workspace / "example-2"
+                    common = str(workspace / ".bare")
+                    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=launch, capture_output=True, text=True, check=True).stdout.strip()
+                    launch_tree = {"name": "main", "path": str(launch), "branch": "main", "head": head}
+                    task_tree = {"name": "example-2", "path": str(task), "branch": "example-2", "head": head}
+                    record = {"schema_version": 1, "task_id": "installed-task-id", "workspace": {"root": str(workspace), "common_dir": common},
+                              "requested_slug": "example", "phase": "ready", "launch": launch_tree,
+                              "task": {"name": "example-2", "path": str(task), "branch": "example-2"}}
+                    base = {"schema_version": 1, "command": "context", "ok": True, "workspace": {"root": str(workspace), "common_dir": common, "faur": True}}
+                    config = work / "faur.json"
+                    config.write_text(json.dumps({
+                        "launch_context": {**base, "worktree": launch_tree, "task": {"status": "none", "record": None}},
+                        "context": {**base, "worktree": task_tree, "task": {"status": "valid", "record": record, "error": None}},
+                        "created": {"schema_version": 1, "command": "add", "ok": True, "worktree": task_tree, "task_id": "installed-task-id", "task": record, "launch": launch_tree},
+                        "task_path": str(task), "launch": str(launch), "record": str(workspace / "_runs/example/runtime.json"),
+                        "running": str(workspace / "_runs/example/state/running")}))
+                    fake_faur = work / "fake_faur.py"
+                    fake_faur.write_text(FAKE_FAUR)
+                    environment.update({"FAKE_FAUR_CONFIG": str(config), "FAKE_FAUR_LOG": str(work / "faur.log"), "FAKE_FAUR_FAIL": ""})
+                    faur_argv = json.dumps([sys.executable, str(fake_faur)])
+                    created = helper(task_scripts / "workflow.py", "start", "example", "--faur-argv", faur_argv, cwd=launch)
+                    self.assertEqual(created["identity"]["name"], "example-2")
+                    previewed = helper(task_scripts / "preview.py", "run", "example", cwd=launch)
+                    self.assertEqual((previewed["hostname"], previewed["worktree"]), ("example.localhost", str(task)))
+                    dry = helper(finish, "example-2", "--dry-run", "--faur-argv", faur_argv, cwd=launch)
+                    self.assertEqual(dry["previews"][0]["phase"], "running")
+                    finished = helper(finish, "example-2", "--faur-argv", faur_argv, cwd=launch)
+                    self.assertEqual(finished["teardown"][0]["result"], "torn down")
+                    self.assertFalse(task.exists())
+                    self.assertFalse((workspace / "_runs/example").exists())
