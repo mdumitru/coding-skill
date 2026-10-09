@@ -23,7 +23,13 @@ context, chooses a free slug, and stores launch/task identity. Use the returned
 canonical task path for every edit, command, and commit. For `execute:`, the
 `task-workflow` runner calls faur and journals plan progress, verification,
 and commits; do not create another worktree or mark checkboxes by hand.
-One request, one task worktree, however small the change.
+One request, one task worktree, however small the change. New plans use coherent
+execution groups with commit-sized children. For grouped `execute:`, explicitly
+delegate one fresh sequential worker per group when supported; workers resume
+that same identity. Persist decisions in the plan and verify group checkpoints
+before advancing. Without fresh-worker support, checkpoint one group and return
+fresh-session continuation instructions. These context boundaries do not clear
+the parent conversation; detailed coordination stays in `task-workflow`.
 
 Exceptions: read-only tasks (including `plan:`), repos that are not faur
 workspaces, and an explicit instruction to work "here" or in a named existing

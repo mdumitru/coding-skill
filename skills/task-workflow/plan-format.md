@@ -5,7 +5,7 @@ Fenced examples do not count. Faur plans have one `Worktree: slug`; optional
 `Launch worktree:` (absolute path) and `Launch branch:` must occur together.
 Plain repository plans forbid all three fields.
 
-Tasks are top-level `- [ ] text` or `- [x] text`. Nested checkboxes are forbidden.
+Legacy flat tasks are top-level `- [ ] text` or `- [x] text`. Flat plans retain their existing behavior. New plans use execution groups below.
 Each task has exactly one subordinate `  - Done when: condition`, before the
 next task or heading. Continuation prose is retained verbatim. Executable fields
 use the same two-space indentation:
@@ -96,3 +96,145 @@ recorded state. Revision preserves identity, task IDs/order, checked state, and
 completed-task records. It refuses a completion transaction in progress and
 journals its own replacement. Retry `revise <slug>` without --content to finish
 an interrupted approved revision; it never adopts unrelated drift.
+
+# Execution groups (opt-in grammar)
+
+A grouped plan uses only top-level group checkboxes with an explicit `Group:`
+ID. Each contains one or more child commit tasks indented two spaces; child
+metadata is indented four spaces. Group metadata precedes its children. Do not
+mix groups and flat tasks or nest deeper. Group and child IDs share a unique
+lowercase kebab-case namespace. Headings terminate metadata ownership; fenced
+examples and continuation prose are preserved verbatim.
+
+```markdown
+# TODO: improve input handling
+
+## Context and decisions
+
+Reject invalid input before processing it.
+
+- [ ] Integrate validation.
+  - Group: validation
+  - Verify: ["python3", "-m", "unittest", "tests.test_input"]
+  - Done when: request handling rejects invalid input.
+  - [ ] Add validation rules.
+    - Task: validation-rules
+    - Commit: add validation rules
+    - Paths: ["src/validation.py", "tests/test_input.py"]
+    - Verify: ["python3", "-m", "unittest", "tests.test_input"]
+    - Done when: valid and invalid input pass the acceptance checks.
+```
+
+A group requires one Group ID, one Done when condition, and at least one Verify
+argv array. It has no Commit, Paths, Task, or Outcome. Child tasks use the same
+executable fields as flat tasks. `init --migrate` adds only missing child IDs,
+preserving explicit IDs, indentation, group membership, and completion evidence.
+`validate` reports separate task/group counts; `next` returns a child with its
+`group_id`, source bounds, and indentation. Ordered children remain available to
+existing commit/evidence consumers. Identity replacement leaves groups intact.
+
+Children carry commit Outcome/Evidence; groups carry independent Evidence.
+Completion must form an ordered prefix. A checked group requires every child
+complete and successful matching group Evidence. A pending group may contain
+completed children (including all its children), but cannot carry group Evidence.
+No child can complete beyond the first uncheckpointed group. Pending children
+cannot carry completion records. Group checkpoints do not create commits.
+
+Flat executable plans and schema-version-1 journals remain supported. Grouping
+is explicit and must never be inferred or introduced into an in-progress flat
+execution. Older readers reject the Group metadata/nesting instead of treating
+a group as a commit task. Use the updated package for grouped plans.
+
+# Group assignment and checkpoint protocol
+
+Grouped journals opt into `group_protocol: 1` within execution schema 1. Old flat
+journals omit these optional fields and retain flat behavior. A grouped journal
+cannot be adopted from checked Markdown alone: retain its original checkpoint
+state. Revisions preserve group IDs/order/membership, checked state, completed
+content, child records, and group Evidence. Never implicitly regroup a flat run.
+
+From the recorded task worktree, the coordinator calls:
+
+```sh
+python3 <skill-dir>/scripts/workflow.py group-next <slug>
+python3 <skill-dir>/scripts/workflow.py group-begin <slug> --group <group-id>
+```
+
+`group-next` validates the completed child prefix and group checkpoints and
+returns the next group plus any active assignment. `group-begin` requires clean
+matching identity and returns a durable unique assignment token. Repeating it
+for the same assigned group retains that token. Do not replace an interrupted
+assignment or hold a filesystem lock throughout model execution. At most one
+worker may edit; resume the recorded assignment after a stopped worker.
+
+A worker supplies both scope arguments on every child operation:
+
+```sh
+python3 <skill-dir>/scripts/workflow.py begin <slug> --group <group-id> --assignment <token>
+python3 <skill-dir>/scripts/workflow.py complete <slug> --group <group-id> --assignment <token>
+```
+
+Missing/wrong/stale scope and advancement beyond the assigned group are refused.
+Child path, verification, staging, commit, evidence, and recovery checks still
+apply. A child interruption retries that same scoped complete operation.
+
+After the worker has returned and every child is journaled, the coordinator
+judges group Done when and closes the assignment:
+
+```sh
+python3 <skill-dir>/scripts/workflow.py group-release <slug> --group <group-id> --assignment <token>
+python3 <skill-dir>/scripts/workflow.py group-complete <slug> --group <group-id> --assignment <token> --accepted
+```
+
+Release requires all children complete and no active child transaction. Released
+assignments refuse further child operations. `--accepted` records the agent's
+semantic judgment; the runner independently verifies the child record prefix,
+contiguous commit ancestry, clean identity, and group Verify argv without a shell.
+It journals checkpoint intent/evidence before atomically replacing Markdown,
+then records the group checkpoint before exposing the next group. This creates
+no extra commit. Worker prose/process success never replaces this checkpoint.
+
+Failed verification, mutations, drift, and interrupted writes retain the exact
+assignment, evidence, pending digest, and error. Retry the same group-complete;
+checkpoint write recovery reuses successful journaled evidence and validates HEAD
+and Markdown. Never clear locks automatically, reset state, skip a failed group,
+or start a competing worker. Final audit requires every child and group record;
+report includes pending groups, active assignment, checkpoints, and plan drift.
+
+# Persisted worker context
+
+Every new grouped plan has exactly one `## Context and decisions` section
+before its first group. Put the objective, settled constraints, cross-group
+interfaces, and approved handoff decisions there. It ends at the next level-1
+or level-2 heading (or first group); lower-level subheadings and fenced content
+remain part of the section. Other introductory sections are not implicitly
+included. Record later approved decisions through `workflow.py revise` in this
+section, never only in a chat transcript.
+
+The read-only helper emits JSON for an assigned worker:
+
+```sh
+python3 <skill-dir>/scripts/group_context.py <slug> --group <group-id> --assignment <token>
+```
+
+It returns validated canonical plan/journal/worktree/helper paths, immutable
+identity, the active assignment, shared decisions, assigned group prose and
+acceptance/Verify, only remaining child task bodies and executable fields, and
+compact previous task/group completion facts. It omits old verification logs,
+unrelated task bodies, and transcripts. The plan/journal paths locate the full
+evidence. It creates no worktree and writes no plan, journal, or lock.
+
+`--previous-limit` bounds previous facts (default 12, range 0..100 for each
+kind); explicit omitted counts and `limits.truncated` report any omission.
+`--max-chars` defaults to 60000; oversized handoffs fail without silently cutting
+acceptance, decisions, or task metadata. Raise the limit or revise group size.
+Output is deterministic across fresh processes. Missing identity, wrong/stale
+assignments, plan drift, active completion/checkpoint transactions, locks, dirty
+worktrees, or changes while reading are refused with recovery diagnostics.
+A clean, begun child may resume with the same assignment and active task ID.
+
+Worker returns must be concise: group/task IDs, outcomes, checkpoint status,
+and approved handoff decisions; blockers name the exact pending operation and
+artifact paths. The coordinator verifies the runner's records rather than
+trusting prose. A completed-child/pending-group handoff can contain no remaining
+children; acceptance and the coordinator checkpoint still remain necessary.

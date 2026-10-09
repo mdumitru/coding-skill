@@ -9,7 +9,7 @@ import logging
 import re
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 # Permit direct execution and importlib loading without another installed skill.
@@ -21,8 +21,8 @@ LOGGER = logging.getLogger('plan-file')
 SLUG_RE = re.compile(r'^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$')
 HASH_RE = re.compile(r'^[0-9a-f]{40}(?:[0-9a-f]{24})?$')
 CHECKBOX = re.compile(r'^- \[([ xX])\] (\S.*)$')
-METADATA = re.compile(r'^  - (Task|Commit|Paths|Verify|Evidence|Outcome):\s*(.*)$')
-RESERVED = re.compile(r'^\s*(?:-\s*)?(Task|Commit|Paths|Verify|Evidence|Outcome|Worktree|Launch worktree|Launch branch):', re.I)
+METADATA = re.compile(r'^(  |    )- (Group|Task|Commit|Paths|Verify|Evidence|Outcome):\s*(.*)$')
+RESERVED = re.compile(r'^\s*(?:-\s*)?(Group|Task|Commit|Paths|Verify|Evidence|Outcome|Done when|Worktree|Launch worktree|Launch branch):', re.I)
 
 
 class PlanFileError(Exception):
@@ -57,6 +57,21 @@ class Task:
     verify: list[list[str]]
     evidence: list[dict[str, object]]
     outcome: str | None
+    group_id: str | None = None
+    indent: int = 0
+
+
+@dataclass(frozen=True)
+class Group:
+    id: str
+    title: str
+    completed: bool
+    line: int
+    end: int
+    done_when: str
+    verify: list[list[str]]
+    evidence: list[dict[str, object]]
+    task_ids: list[str]
 
 
 @dataclass(frozen=True)
@@ -66,6 +81,7 @@ class Plan:
     launch_worktree: str | None
     launch_branch: str | None
     tasks: list[Task]
+    groups: list[Group] = field(default_factory=list)
 
     @property
     def digest(self) -> str:
@@ -78,6 +94,7 @@ class ValidationResult:
     faur: bool
     worktree: str | None
     tasks: TaskCounts
+    groups: TaskCounts = field(default_factory=lambda: TaskCounts(0, 0, 0))
 
 
 def git_output(cwd: Path, *args: str) -> str:
@@ -148,6 +165,26 @@ def json_strings(raw: str, field: str) -> list[str]:
     return value
 
 
+def parse_evidence(values: list[str]) -> list[dict[str, object]]:
+    evidence: list[dict[str, object]] = []
+    for raw in values:
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise PlanFileError('Evidence must be a JSON object') from exc
+        if not isinstance(item, dict) or not item:
+            raise PlanFileError('Evidence must be a nonempty JSON object')
+        evidence.append(item)
+    return evidence
+
+
+def explicit_id(raw: str, kind: str) -> str:
+    match = re.fullmatch(r'(?:`([a-z][a-z0-9-]*)`|([a-z][a-z0-9-]*))', raw)
+    if match is None or not SLUG_RE.fullmatch(match[1] or match[2]):
+        raise PlanFileError(f'malformed {kind} ID: {raw}')
+    return match[1] or match[2]
+
+
 def parse_plan(content: str, *, is_faur: bool, runtime: bool = False) -> Plan:
     lines = visible_lines(content)
     if not any(re.fullmatch(r'# TODO:\s*\S.*', line) for line in lines):
@@ -156,8 +193,8 @@ def parse_plan(content: str, *, is_faur: bool, runtime: bool = False) -> Plan:
     starts: list[int] = []
     for i, line in enumerate(lines):
         if re.match(r'^\s*-\s*\[', line):
-            if not CHECKBOX.fullmatch(line):
-                raise PlanFileError(f'malformed, nested, or unsupported checkbox on line {i + 1}')
+            if not re.fullmatch(r'(?:  )?- \[([ xX])\] (\S.*)', line):
+                raise PlanFileError(f'malformed, nested, or unsupported checkbox on line {i + 1}; only groups and one child level are supported')
             starts.append(i)
         match = re.match(r'^(Worktree|Launch worktree|Launch branch):\s*(.*)$', line)
         if match:
@@ -168,8 +205,6 @@ def parse_plan(content: str, *, is_faur: bool, runtime: bool = False) -> Plan:
             if not value or '`' in value or (match[1] != 'Launch worktree' and re.search(r'\s', value)):
                 raise PlanFileError(f'malformed {match[1]} field')
             top[match[1]] = value
-        elif RESERVED.match(line) and not METADATA.fullmatch(line):
-            raise PlanFileError(f'malformed or misplaced metadata on line {i + 1}')
     if not is_faur and top:
         raise PlanFileError('plain-repository plan must not contain worktree metadata')
     if is_faur and ('Worktree' not in top or not SLUG_RE.fullmatch(top['Worktree'])):
@@ -180,41 +215,76 @@ def parse_plan(content: str, *, is_faur: bool, runtime: bool = False) -> Plan:
         raise PlanFileError('Launch worktree must be an absolute path')
     if not starts:
         raise PlanFileError('plan must contain at least one checkbox task')
-    reserved_ids = {match[1].strip('`') for line in lines if (match := re.fullmatch(r'  - Task:\s*(.*)', line))}
+    reserved_ids = {explicit_id(m[3], m[2]) for line in lines
+                    if (m := METADATA.fullmatch(line)) and m[2] in {'Task', 'Group'}}
     tasks: list[Task] = []
+    groups: list[Group] = []
     consumed: set[int] = set()
+    seen_ids: set[str] = set()
+    grouped: bool | None = None
+    current: Group | None = None
     for n, start in enumerate(starts):
+        indent = len(lines[start]) - len(lines[start].lstrip())
         end = starts[n + 1] if n + 1 < len(starts) else len(lines)
         section = next((i for i in range(start + 1, end) if re.match(r'^#{1,6} ', lines[i])), end)
         fields: dict[str, list[str]] = {}
         done: list[str] = []
+        prefix = ' ' * (indent + 2)
         for i in range(start + 1, section):
             line = lines[i]
-            if re.match(r'^  - Done when(?::|\s)\s*\S', line, re.I):
-                done.append(re.sub(r'^  - Done when:?\s*', '', line, flags=re.I))
+            if re.match(r'^' + prefix + r'- Done when(?::|\s)\s*\S', line, re.I):
+                done.append(re.sub(r'^' + prefix + r'- Done when:?\s*', '', line, flags=re.I))
+                consumed.add(i)
             match = METADATA.fullmatch(line)
-            if match:
-                fields.setdefault(match[1], []).append(match[2])
+            if match and match[1] == prefix:
+                fields.setdefault(match[2], []).append(match[3])
                 consumed.add(i)
         if len(done) != 1:
             raise PlanFileError(f'checkbox task on line {start + 1} requires one subordinate Done when clause')
         for key, values in fields.items():
             if key not in {'Verify', 'Evidence'} and len(values) != 1:
                 raise PlanFileError(f'duplicate {key} on task line {start + 1}')
-        if 'Task' in fields:
-            raw_id = fields['Task'][0]
-            match_id = re.fullmatch(r'(?:`([a-z][a-z0-9-]*)`|([a-z][a-z0-9-]*))', raw_id)
-            if match_id is None:
-                raise PlanFileError(f'malformed Task ID: {raw_id}')
-            task_id = match_id[1] or match_id[2]
+        is_group = 'Group' in fields
+        if indent == 0:
+            if grouped is not None and grouped != is_group:
+                raise PlanFileError('mixed flat tasks and execution groups are forbidden')
+            grouped = is_group
+            current = None
+        elif not grouped or not groups:
+            raise PlanFileError('nested task requires a top-level Group ID')
         else:
-            candidate = n + 1
-            task_id = f'task-{candidate}'
-            while task_id in reserved_ids or any(t.id == task_id for t in tasks):
+            current = groups[-1]
+            if any(re.match(r'^#{1,6} ', line) for line in lines[current.line + 1:start]):
+                raise PlanFileError('child task must remain inside its group before a heading')
+        if is_group and indent:
+            raise PlanFileError('nested groups are forbidden')
+        kind = 'Group' if is_group else 'Task'
+        if kind in fields:
+            item_id = explicit_id(fields[kind][0], kind)
+        else:
+            candidate = len(tasks) + 1
+            item_id = f'task-{candidate}'
+            while item_id in reserved_ids or item_id in seen_ids:
                 candidate += 1
-                task_id = f'task-{candidate}'
-        if not SLUG_RE.fullmatch(task_id) or any(t.id == task_id for t in tasks):
-            raise PlanFileError(f'invalid or duplicate Task ID: {task_id}')
+                item_id = f'task-{candidate}'
+        if item_id in seen_ids:
+            raise PlanFileError(f'invalid or duplicate {kind} ID: {item_id}')
+        seen_ids.add(item_id)
+        match = CHECKBOX.fullmatch(lines[start][indent:])
+        assert match
+        completed = match[1].lower() == 'x'
+        verify = [json_strings(v, 'Verify') for v in fields.get('Verify', [])]
+        evidence = parse_evidence(fields.get('Evidence', []))
+        if is_group:
+            if any(key not in {'Group', 'Verify', 'Evidence'} for key in fields):
+                raise PlanFileError(f'group {item_id} contains child-only metadata')
+            if not verify:
+                raise PlanFileError(f'group {item_id} requires at least one Verify')
+            group_end = next((i for i in starts[n + 1:] if not lines[i].startswith(' ')), len(lines))
+            groups.append(Group(item_id, match[2], completed, start, group_end, done[0], verify, evidence, []))
+            continue
+        if 'Group' in fields:
+            raise PlanFileError('misplaced Group metadata')
         commit = fields.get('Commit', [None])[0]
         if commit is not None and (error := subject_error(commit)):
             raise PlanFileError(error)
@@ -223,31 +293,55 @@ def parse_plan(content: str, *, is_faur: bool, runtime: bool = False) -> Plan:
         paths = json_strings(raw_paths, 'Paths') if raw_paths and not legacy_paths else []
         if any(p.startswith('/') or '..' in Path(p).parts or '\\' in p for p in paths):
             raise PlanFileError('Paths must be relative patterns without parent traversal')
-        verify = [json_strings(v, 'Verify') for v in fields.get('Verify', [])]
-        evidence: list[dict[str, object]] = []
-        for raw in fields.get('Evidence', []):
-            try:
-                item = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                raise PlanFileError('Evidence must be a JSON object') from exc
-            if not isinstance(item, dict) or not item:
-                raise PlanFileError('Evidence must be a nonempty JSON object')
-            evidence.append(item)
         outcome = fields.get('Outcome', [None])[0]
         if outcome is not None and outcome != 'no-change' and not HASH_RE.fullmatch(outcome):
             raise PlanFileError('Outcome requires a full commit hash or no-change')
-        match = CHECKBOX.fullmatch(lines[start])
-        assert match
-        task = Task(task_id, match[2], match[1].lower() == 'x', start, end, 'Task' in fields, done[0], commit, paths, verify, evidence, outcome)
+        task = Task(item_id, match[2], completed, start, end, 'Task' in fields,
+                    done[0], commit, paths, verify, evidence, outcome, current.id if current else None, indent)
         if runtime:
             missing = [key for key, present in [('Task', task.explicit_id), ('Commit', commit), ('Paths', paths), ('Verify', verify)] if not present]
             if missing:
-                raise PlanFileError(f'task {task_id} missing executable fields: {", ".join(missing)}')
+                raise PlanFileError(f'task {item_id} missing executable fields: {", ".join(missing)}')
+        if current:
+            current.task_ids.append(item_id)
         tasks.append(task)
     for i, line in enumerate(lines):
-        if METADATA.fullmatch(line) and i not in consumed:
-            raise PlanFileError(f'misplaced task metadata on line {i + 1}')
-    return Plan(content, top.get('Worktree'), top.get('Launch worktree'), top.get('Launch branch'), tasks)
+        if RESERVED.match(line) and i not in consumed and not re.match(r'^(Worktree|Launch worktree|Launch branch):', line):
+            raise PlanFileError(f'malformed or misplaced metadata on line {i + 1}')
+    if grouped:
+        pending_seen = False
+        for group in groups:
+            children = [t for t in tasks if t.group_id == group.id]
+            if not children:
+                raise PlanFileError(f'empty group {group.id} requires child tasks')
+            if group.completed and (pending_seen or any(not t.completed for t in children)):
+                raise PlanFileError(f'inconsistent completion state for group {group.id}')
+            if not group.completed:
+                pending_seen = True
+            if group.completed and not successful_evidence(group.verify, group.evidence):
+                raise PlanFileError(f'completed group {group.id} requires matching successful Evidence')
+            if not group.completed and group.evidence:
+                raise PlanFileError(f'pending group {group.id} cannot carry completion Evidence')
+        pending_task_seen = False
+        pending_group = next((g.id for g in groups if not g.completed), None)
+        for task in tasks:
+            if not task.completed:
+                pending_task_seen = True
+            elif pending_task_seen or not task.outcome or not successful_evidence(task.verify, task.evidence):
+                raise PlanFileError(f'inconsistent completion state or missing Outcome/Evidence for child {task.id}')
+            if not task.completed and (task.outcome or task.evidence):
+                raise PlanFileError(f'pending child {task.id} cannot carry completion records')
+            group_index = next(i for i, g in enumerate(groups) if g.id == task.group_id)
+            pending_index = next((i for i, g in enumerate(groups) if g.id == pending_group), len(groups))
+            if task.completed and group_index > pending_index:
+                raise PlanFileError('completed child cannot follow an uncheckpointed group')
+    return Plan(content, top.get('Worktree'), top.get('Launch worktree'), top.get('Launch branch'), tasks, groups)
+
+
+def successful_evidence(verify: list[list[str]], evidence: list[dict[str, object]]) -> bool:
+    return bool(verify) and len(verify) == len(evidence) and all(
+        type(item.get('exit_code')) is int and item.get('exit_code') == 0 and item.get('argv') == argv
+        for argv, item in zip(verify, evidence))
 
 
 def read_plan(path: Path, context: GitContext, *, runtime: bool = False) -> Plan:
@@ -270,7 +364,7 @@ def migrate_ids(plan: Plan) -> str:
     lines = plan.content.splitlines(keepends=True)
     for task in reversed(plan.tasks):
         if not task.explicit_id:
-            lines.insert(task.line + 1, f'  - Task: {task.id}\n')
+            lines.insert(task.line + 1, f'{" " * (task.indent + 2)}- Task: {task.id}\n')
     return ''.join(lines)
 
 
@@ -297,8 +391,23 @@ def mark_complete(plan: Plan, task_id: str, *, outcome: str, evidence: list[dict
         raise PlanFileError('completion requires the next pending task')
     lines = plan.content.splitlines(keepends=True)
     lines[task.line] = lines[task.line].replace('- [ ]', '- [x]', 1)
-    added = [f'  - Outcome: {outcome}\n'] + [f'  - Evidence: {json.dumps(e, sort_keys=True)}\n' for e in evidence]
+    prefix = ' ' * (task.indent + 2)
+    added = [f'{prefix}- Outcome: {outcome}\n'] + [f'{prefix}- Evidence: {json.dumps(e, sort_keys=True)}\n' for e in evidence]
     lines[task.line + 1:task.line + 1] = added
+    return ''.join(lines)
+
+
+def mark_group_complete(plan: Plan, group_id: str, evidence: list[dict[str, object]]) -> str:
+    group = next((g for g in plan.groups if not g.completed), None)
+    if group is None or group.id != group_id:
+        raise PlanFileError('group completion requires the next pending group')
+    if any(not t.completed for t in plan.tasks if t.group_id == group_id):
+        raise PlanFileError('group completion requires every child complete')
+    if not successful_evidence(group.verify, evidence):
+        raise PlanFileError('group completion requires matching successful Evidence')
+    lines = plan.content.splitlines(keepends=True)
+    lines[group.line] = lines[group.line].replace('- [ ]', '- [x]', 1)
+    lines[group.line + 1:group.line + 1] = [f'  - Evidence: {json.dumps(e, sort_keys=True)}\n' for e in evidence]
     return ''.join(lines)
 
 
@@ -306,7 +415,8 @@ def validate_plan(slug: str, *, cwd: Path | None = None, runtime: bool = False) 
     path, context = resolve_plan(slug, cwd=cwd)
     plan = read_plan(path, context, runtime=runtime)
     completed = sum(t.completed for t in plan.tasks)
-    return ValidationResult(str(path), context.is_faur, plan.worktree, TaskCounts(len(plan.tasks), len(plan.tasks) - completed, completed))
+    groups_done = sum(g.completed for g in plan.groups)
+    return ValidationResult(str(path), context.is_faur, plan.worktree, TaskCounts(len(plan.tasks), len(plan.tasks) - completed, completed), TaskCounts(len(plan.groups), len(plan.groups) - groups_done, groups_done))
 
 
 def build_parser() -> argparse.ArgumentParser:

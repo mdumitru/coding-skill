@@ -13,7 +13,9 @@ skill directory; keep using that same script after changing working directory.
 Read the matching mode reference completely before acting:
 
 - For `plan:`, read `plan-workflow.md`.
-- For `execute:`, read `execute-workflow.md`.
+- For `execute:`, read `execute-workflow.md`; grouped plans also require
+  `group-execution.md`. This skill explicitly requests one fresh sequential
+  worker per group when supported, using the recorded execution worktree.
 - For `run:`, alone or combined with `execute:`, read `run-workflow.md` (and
   `execute-workflow.md` for a combined request).
 

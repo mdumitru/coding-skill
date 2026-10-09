@@ -422,3 +422,138 @@ class StableIdTests(unittest.TestCase):
         for malformed in ('`task-1', 'task-1`', '``task-1``'):
             with self.assertRaisesRegex(plan_file.PlanFileError, 'malformed Task ID'):
                 plan_file.parse_plan(content.replace('Task: task-1', f'Task: {malformed}'), is_faur=False)
+
+
+GROUPED = """# TODO: grouped fixture
+
+## Context and decisions
+
+Persist this decision for workers.
+
+```markdown
+- [ ] fenced task
+  - Group: ignored
+```
+
+- [ ] Implement inputs.
+  - Group: inputs
+  - Verify: ["true"]
+  - Done when: inputs work together.
+  Group prose retained.
+  - [ ] Validate inputs.
+    - Task: validate-inputs
+    - Commit: validate inputs
+    - Paths: ["input.py"]
+    - Verify: ["true"]
+    - Done when: inputs are valid.
+    Child prose retained.
+  - [ ] Connect inputs.
+    - Task: connect-inputs
+    - Commit: connect inputs
+    - Paths: ["input.py"]
+    - Verify: ["true"]
+    - Done when: inputs are connected.
+- [ ] Implement outputs.
+  - Group: outputs
+  - Verify: ["true"]
+  - Done when: outputs work.
+  - [ ] Produce outputs.
+    - Task: produce-outputs
+    - Commit: produce outputs
+    - Paths: ["output.py"]
+    - Verify: ["true"]
+    - Done when: outputs exist.
+"""
+
+
+class GroupedPlanTests(unittest.TestCase):
+    def parse(self, content: str = GROUPED) -> object:
+        return plan_file.parse_plan(content, is_faur=False, runtime=True)
+
+    def test_order_membership_and_source_locations(self) -> None:
+        plan = self.parse()
+        self.assertEqual([g.id for g in plan.groups], ['inputs', 'outputs'])
+        self.assertEqual(plan.groups[0].task_ids, ['validate-inputs', 'connect-inputs'])
+        self.assertEqual([t.group_id for t in plan.tasks], ['inputs', 'inputs', 'outputs'])
+        for task in plan.tasks:
+            self.assertTrue(GROUPED.splitlines()[task.line].startswith('  - [ ]'))
+            self.assertEqual(task.indent, 2)
+            self.assertGreater(task.end, task.line)
+        self.assertEqual(plan.groups[0].end, plan.groups[1].line)
+
+    def test_round_trip_child_completion_and_identity_preserve_structure(self) -> None:
+        plan = self.parse()
+        completed = plan_file.mark_complete(plan, 'validate-inputs', outcome='a' * 40,
+                    evidence=[{'argv': ['true'], 'exit_code': 0}])
+        updated = self.parse(completed)
+        self.assertTrue(updated.tasks[0].completed)
+        self.assertFalse(updated.groups[0].completed)
+        stripped = '\n'.join(line for line in completed.splitlines()
+                             if not line.startswith('    - Outcome:') and not line.startswith('    - Evidence:')) + '\n'
+        self.assertEqual(stripped.replace('  - [x]', '  - [ ]'), GROUPED)
+        identity = plan_file.set_identity(updated, 'fixture', '/tmp/main', 'main')
+        faur = plan_file.parse_plan(identity, is_faur=True, runtime=True)
+        self.assertEqual(faur.groups[0].task_ids, updated.groups[0].task_ids)
+        self.assertIn('Group prose retained.', identity)
+        self.assertIn('fenced task', identity)
+
+    def test_id_migration_only_adds_missing_child_ids_at_four_spaces(self) -> None:
+        legacy = GROUPED.replace('    - Task: connect-inputs\n', '')
+        plan = plan_file.parse_plan(legacy, is_faur=False)
+        self.assertEqual(plan.tasks[0].id, 'validate-inputs')
+        migrated = plan_file.migrate_ids(plan)
+        self.assertIn('    - Task: task-2\n', migrated)
+        self.assertEqual(migrated.replace('    - Task: task-2\n', ''), legacy)
+        self.parse(migrated)
+
+    def test_invalid_nesting_mixed_ids_metadata_and_completion(self) -> None:
+        invalid = [
+            GROUPED.replace('  - Group: inputs\n', ''),
+            GROUPED.replace('  - Group: inputs', '  - Task: inputs'),
+            GROUPED.replace('  - Group: outputs', '  - Group: inputs'),
+            GROUPED.replace('    - Task: validate-inputs', '    - Task: inputs'),
+            GROUPED.replace('    - Task: connect-inputs', '    - Task: validate-inputs'),
+            GROUPED.replace('  - [ ] Validate inputs.', '    - [ ] Validate inputs.'),
+            GROUPED.replace('    - Task: validate-inputs', '  - Task: validate-inputs'),
+            GROUPED.replace('  - [ ] Validate inputs.', '- [ ] Validate inputs.'),
+            GROUPED.replace('  - [ ] Validate inputs.', '## Boundary\n  - [ ] Validate inputs.'),
+            GROUPED.replace('- [ ] Implement inputs.', '- [x] Implement inputs.'),
+            GROUPED.replace('  - [ ] Validate inputs.', '  - [x] Validate inputs.'),
+            GROUPED.replace('  - Group: inputs', '  - Group: inputs\n  - Commit: implement inputs'),
+            GROUPED[:GROUPED.index('  - [ ] Produce outputs.')],
+            GROUPED.replace('  - Done when: outputs work.\n', ''),
+            GROUPED.replace('  - Group: outputs', '    - Group: outputs'),
+        ]
+        for content in invalid:
+            with self.subTest(content=content), self.assertRaises(plan_file.PlanFileError):
+                self.parse(content)
+
+    def test_group_requires_matching_evidence_and_child_completion_prefix(self) -> None:
+        plan = self.parse()
+        for task_id in ['validate-inputs', 'connect-inputs']:
+            content = plan_file.mark_complete(plan, task_id, outcome='no-change',
+                      evidence=[{'argv': ['true'], 'exit_code': 0}])
+            plan = self.parse(content)
+        checked = plan.content.replace('- [ ] Implement inputs.', '- [x] Implement inputs.')
+        with self.assertRaisesRegex(plan_file.PlanFileError, 'Evidence'):
+            self.parse(checked)
+        checked = checked.replace('  - Group: inputs', '  - Evidence: {"argv": ["true"], "exit_code": 0}\n  - Group: inputs')
+        self.assertTrue(self.parse(checked).groups[0].completed)
+        with self.assertRaisesRegex(plan_file.PlanFileError, 'uncheckpointed'):
+            self.parse(plan_file.mark_complete(plan, 'produce-outputs', outcome='no-change',
+                       evidence=[{'argv': ['true'], 'exit_code': 0}]))
+
+    def test_validation_counts_and_next_include_group_membership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            run_git('init', '--quiet', cwd=repository)
+            path = repository / '_plans/example.md'
+            path.parent.mkdir()
+            path.write_text(GROUPED)
+            counts = plan_file.validate_plan('example', cwd=repository, runtime=True)
+            self.assertEqual(counts.tasks.total, 3)
+            self.assertEqual(counts.groups.pending, 2)
+            result = subprocess.run([sys.executable, str(HELPER), 'next', 'example', '--runtime'],
+                       cwd=repository, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)['group_id'], 'inputs')

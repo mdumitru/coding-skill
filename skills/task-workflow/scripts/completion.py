@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from plan_file import Plan, Task, git_output, mark_complete, read_plan, replace_plan, resolve_plan
+from plan_file import Plan, Task, successful_evidence, git_output, mark_complete, read_plan, replace_plan, resolve_plan
 from policy import forbidden_path, subject_error
 from state_io import StateError, plan_lock
 
@@ -82,6 +82,16 @@ def evidence_valid(task: Task, evidence: object) -> bool:
     return (isinstance(evidence, list) and len(evidence) == len(task.verify)
             and all(isinstance(item, dict) and type(item.get('exit_code')) is int and item.get('exit_code') == 0 and item.get('argv') == argv
                     for item, argv in zip(evidence, task.verify)))
+
+
+def verification(argv: list[str], worktree: Path) -> dict[str, object]:
+    try:
+        result = subprocess.run(argv, cwd=worktree, capture_output=True, text=True, errors='replace')
+        return {'argv': argv, 'exit_code': result.returncode, 'stdout': result.stdout[:4000],
+                'stderr': result.stderr[:4000],
+                'output_sha256': hashlib.sha256((result.stdout + result.stderr).encode()).hexdigest()}
+    except OSError as exc:
+        return {'argv': argv, 'exit_code': 127, 'stderr': str(exc)}
 
 
 @dataclass(frozen=True)
@@ -164,7 +174,7 @@ def finalize(slug: str, state: object, plan: Plan, record: dict[str, object]) ->
     return state
 
 
-def complete(slug: str) -> object:
+def complete(slug: str, *, group_id: str | None = None, assignment: str | None = None) -> object:
     import workflow as runtime
     path, context = resolve_plan(slug)
     with plan_lock(path):
@@ -177,6 +187,7 @@ def complete(slug: str) -> object:
         task = next((t for t in plan.tasks if t.id == active.task_id), None)
         if task is None:
             raise StateError('active task is missing from plan')
+        runtime.check_scope(plan, state, group_id, assignment, task)
         try:
             if plan.digest != state.plan_digest:
                 if not (active.phase in {'committed', 'no-change'} and task.completed and state.pending_digest == plan.digest):
@@ -240,11 +251,7 @@ def complete(slug: str) -> object:
                 active.evidence = []
                 active.error = None
                 for argv in task.verify:
-                    try:
-                        result = subprocess.run(argv, cwd=worktree, capture_output=True, text=True, errors='replace')
-                        entry: dict[str, object] = {'argv': argv, 'exit_code': result.returncode, 'stdout': result.stdout[:4000], 'stderr': result.stderr[:4000], 'output_sha256': hashlib.sha256((result.stdout + result.stderr).encode()).hexdigest()}
-                    except OSError as exc:
-                        entry = {'argv': argv, 'exit_code': 127, 'stderr': str(exc)}
+                    entry = verification(argv, worktree)
                     active.evidence.append(entry)
                     runtime.save(path, state)
                     if entry['exit_code'] != 0:
@@ -301,6 +308,54 @@ def complete(slug: str) -> object:
             raise
 
 
+def validate_prefix(worktree: Path, plan: Plan, state: object) -> None:
+    import workflow as runtime
+    assert isinstance(state, runtime.Execution)
+    completed = [t for t in plan.tasks if t.completed]
+    if [r.get('task_id') for r in state.records] != [t.id for t in completed]:
+        raise StateError('task completion records missing or out of order')
+    if any(not t.completed for t in plan.tasks[:len(completed)]):
+        raise StateError('task completion does not form an ordered prefix')
+    previous: str | None = None
+    for task, record in zip(completed, state.records):
+        record_valid(worktree, task, record)
+        if task.outcome != record.get('outcome') or task.evidence != record.get('evidence'):
+            raise StateError('Markdown completion evidence differs from execution state')
+        if previous and record.get('start_head') != previous:
+            raise StateError('task commit chain is not contiguous')
+        previous = str(record['end_head'])
+    if previous and previous != git_output(worktree, 'rev-parse', 'HEAD'):
+        raise StateError('unrecorded commits follow the task chain')
+
+
+def validate_groups(plan: Plan, state: object, *, recovering: str | None = None) -> None:
+    import workflow as runtime
+    assert isinstance(state, runtime.Execution)
+    if bool(plan.groups) != bool(state.group_protocol):
+        raise StateError('group grammar and execution protocol differ')
+    completed = [g for g in plan.groups if g.completed and g.id != recovering]
+    if [r.get('group_id') for r in state.group_records] != [g.id for g in completed]:
+        raise StateError('group checkpoint records missing or out of order')
+    assignments: set[str] = set()
+    for group, record in zip(completed, state.group_records):
+        children = [r for r in state.records if r.get('task_id') in group.task_ids]
+        if (not children or len(children) != len(group.task_ids) or record.get('task_ids') != group.task_ids
+                or record.get('accepted') is not True or record.get('evidence') != group.evidence
+                or not successful_evidence(group.verify, group.evidence)
+                or record.get('start_head') != children[0].get('start_head')
+                or record.get('end_head') != children[-1].get('end_head')):
+            raise StateError(f'group {group.id} checkpoint differs from child/evidence boundaries')
+        token = record.get('assignment')
+        if not isinstance(token, str) or not token or token in assignments:
+            raise StateError('invalid or reused group assignment token')
+        assignments.add(token)
+    active = state.active_group
+    if active:
+        pending = next((g for g in plan.groups if not g.completed or g.id == recovering), None)
+        if pending is None or pending.id != active.group_id or active.assignment in assignments:
+            raise StateError('active group assignment is stale or out of order')
+
+
 def audit(slug: str) -> object:
     import workflow as runtime
     path, context = resolve_plan(slug)
@@ -308,7 +363,7 @@ def audit(slug: str) -> object:
         plan = read_plan(path, context, runtime=True)
         state = runtime.load(path)
         worktree = runtime.check_identity(state, context)
-        if state.phase != 'ready' or state.active or state.pending_digest:
+        if state.phase != 'ready' or state.active or state.active_group or state.pending_digest:
             raise StateError('unresolved workflow transaction')
         if state.plan_digest != plan.digest:
             raise StateError('plan drift since recorded completion')
@@ -316,18 +371,12 @@ def audit(slug: str) -> object:
             raise StateError('audit requires a clean worktree without Git operations')
         if any(not t.completed for t in plan.tasks):
             raise StateError('audit requires every task complete')
-        if [r.get('task_id') for r in state.records] != [t.id for t in plan.tasks]:
-            raise StateError('task completion records missing or out of order')
-        previous: str | None = None
-        for task, record in zip(plan.tasks, state.records):
-            record_valid(worktree, task, record)
-            if task.outcome != record.get('outcome') or task.evidence != record.get('evidence'):
-                raise StateError('Markdown completion evidence differs from execution state')
-            if previous and record.get('start_head') != previous:
-                raise StateError('task commit chain is not contiguous')
-            previous = str(record['end_head'])
-        if previous != git_output(worktree, 'rev-parse', 'HEAD'):
-            raise StateError('unrecorded commits follow the task chain')
+        if any(not g.completed for g in plan.groups):
+            raise StateError('audit requires every group checkpoint complete')
+        validate_prefix(worktree, plan, state)
+        validate_groups(plan, state)
+        if not state.records:
+            raise StateError('audit requires task completion records')
         return state
 
 
@@ -340,8 +389,9 @@ def report(slug: str, *, markdown: bool = False) -> str:
         worktree = runtime.check_identity(state, context, require_cwd=False)
         from preview import load_intent
         intent = load_intent(path)
-        facts = {'run_intent': intent['phase'] if intent else None, 'plan': str(path), 'phase': state.phase, 'identity': asdict(state.identity), 'head': git_output(worktree, 'rev-parse', 'HEAD'), 'dirty': not runtime.clean(worktree), 'pending': [t.id for t in plan.tasks if not t.completed], 'active': asdict(state.active) if state.active else None, 'records': state.records}
+        facts = {'run_intent': intent['phase'] if intent else None, 'plan': str(path), 'phase': state.phase, 'identity': asdict(state.identity), 'head': git_output(worktree, 'rev-parse', 'HEAD'), 'dirty': not runtime.clean(worktree), 'pending': [t.id for t in plan.tasks if not t.completed], 'active': asdict(state.active) if state.active else None, 'records': state.records, 'pending_groups': [g.id for g in plan.groups if not g.completed], 'active_group': asdict(state.active_group) if state.active_group else None, 'group_records': state.group_records, 'plan_drift': plan.digest != state.plan_digest}
         if markdown:
+            group_summary = f'Pending groups: {len(facts["pending_groups"])}. Checkpoints: {len(state.group_records)}.\n' if plan.groups else ''
             commits = ', '.join(str(r['outcome'])[:7] for r in state.records if r.get('outcome') != 'no-change') or 'none'
-            return f'Worktree: {worktree} (branch {state.identity.branch}).\nCommits: {commits}. Pending tasks: {len(facts["pending"])}. Dirty: {facts["dirty"]}.\n' + (f'Run intent: {facts["run_intent"]}.\n' if intent else '')
+            return f'Worktree: {worktree} (branch {state.identity.branch}).\nCommits: {commits}. Pending tasks: {len(facts["pending"])}. Dirty: {facts["dirty"]}.\n' + group_summary + (f'Run intent: {facts["run_intent"]}.\n' if intent else '')
         return json.dumps(facts, sort_keys=True)

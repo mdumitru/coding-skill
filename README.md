@@ -155,6 +155,29 @@ commit/path policy, commits once, and writes progress with evidence. `audit`
 checks the complete commit/evidence chain, and `report --markdown` shows recorded
 facts. See the skill's plan-format reference for syntax and crash recovery.
 
+New plans use coherent execution groups containing independently verified commit
+tasks. A group shares investigation and decisions; its boundary creates a fresh
+worker context and a verified checkpoint, while its children define commit
+boundaries. One canonical task worktree serves the whole plan. Flat plans and
+old schema-1 journals keep their behavior; in-progress plans are never silently
+regrouped.
+
+The coordinator explicitly delegates one new worker per group, sequentially,
+using Claude Code non-fork agents or Codex's documented no-history spawn control
+when exposed. It passes the persisted `Context and decisions` section and scoped
+`group_context.py` output, receives compact outcomes, and verifies journaled
+checkpoints before advancing. Source investigations and test logs stay in workers
+and artifacts. Durable decisions travel through approved plan revisions rather
+than inherited chat history. Fresh workers do not clear the parent session or
+guarantee subscription savings; start execution fresh after a large planning
+session. If the harness lacks fresh-context support, execution checkpoints one
+group and stops with explicit instructions to continue in a fresh session.
+
+See [group coordination](skills/task-workflow/group-execution.md) for scoped
+commands, harness capability checks, interruption recovery, and an optional
+real-Claude smoke procedure. Deterministic tests exercise the protocol and
+artifact handoff; the real-Claude smoke was not run during this implementation.
+
 Faur must support schema version 1 context and strict task creation. Ordinary
 changes call `faur worktree context --json` then
 `faur worktree add <slug> --task --unique --json`; execute's runner makes these

@@ -507,3 +507,217 @@ class FinalRecoveryTests(unittest.TestCase):
             path.write_text(json.dumps(data))
             with self.assertRaisesRegex(StateError, 'unknown active'):
                 workflow.load(self.plan)
+
+
+def grouped_plan(*, faur: bool = False, groups: int = 2, children: int = 2) -> str:
+    prefix = '# TODO: grouped fixture\n' + ('Worktree: example\n' if faur else '')
+    prefix += '\n## Context and decisions\n\nUse plain text files to persist results.\n\n'
+    for group in range(1, groups + 1):
+        prefix += (f'- [ ] Group {group}\n  - Group: group-{group}\n'
+                   f'  - Verify: {json.dumps([sys.executable, "-c", "print(123)"])}\n'
+                   '  - Done when: child results work together.\n')
+        for child in range(1, children + 1):
+            prefix += (f'  - [ ] Child {group}/{child}\n    - Task: child-{group}-{child}\n'
+                       f'    - Commit: implement child {group} {child}\n    - Paths: ["*.txt"]\n'
+                       f'    - Verify: {json.dumps([sys.executable, "-c", "print(123)"])}\n'
+                       '    - Done when: child acceptance holds.\n')
+    return prefix
+
+
+class GroupTransactionTests(unittest.TestCase):
+    setUp = WorkflowTests.setUp
+    tearDown = WorkflowTests.tearDown
+
+    def assign(self) -> str:
+        self.plan.write_text(grouped_plan())
+        workflow.start('example', runner=['unused'])
+        return workflow.group_begin('example', 'group-1').active_group.assignment
+
+    def complete_children(self, group: str, token: str, *, changed: bool = False) -> None:
+        from completion import complete
+        for n in range(1, 3):
+            workflow.begin('example', group_id=group, assignment=token)
+            if changed:
+                (self.repo / f'{group}-{n}.txt').write_text(f'{group}/{n}\n')
+            complete('example', group_id=group, assignment=token)
+
+    def checkpoint(self, group: str, token: str) -> workflow.Execution:
+        workflow.group_release('example', group, token)
+        return workflow.group_complete('example', group, token, accepted=True)
+
+    def test_two_groups_contiguous_commits_scope_and_final_audit(self) -> None:
+        import completion
+        with working_directory(self.repo):
+            token = self.assign()
+            selection = workflow.group_next('example')
+            self.assertEqual(selection['group']['id'], 'group-1')
+            self.assertEqual(workflow.group_begin('example', 'group-1').active_group.assignment, token)
+            with self.assertRaisesRegex(StateError, 'assignment'):
+                workflow.begin('example')
+            with self.assertRaisesRegex(StateError, 'stale'):
+                workflow.begin('example', group_id='group-1', assignment='wrong')
+            with self.assertRaisesRegex(StateError, 'next pending'):
+                workflow.group_begin('example', 'group-2')
+            self.complete_children('group-1', token, changed=True)
+            with self.assertRaisesRegex(StateError, 'boundary'):
+                workflow.begin('example', group_id='group-1', assignment=token)
+            with self.assertRaisesRegex(StateError, 'group-release'):
+                workflow.group_complete('example', 'group-1', token, accepted=True)
+            workflow.group_release('example', 'group-1', token)
+            with self.assertRaisesRegex(StateError, 'accepted'):
+                workflow.group_complete('example', 'group-1', token, accepted=False)
+            with self.assertRaisesRegex(StateError, 'released'):
+                workflow.begin('example', group_id='group-1', assignment=token)
+            workflow.group_complete('example', 'group-1', token, accepted=True)
+            second = workflow.group_begin('example', 'group-2').active_group.assignment
+            self.assertNotEqual(token, second)
+            with self.assertRaisesRegex(StateError, 'stale'):
+                workflow.begin('example', group_id='group-2', assignment=token)
+            self.complete_children('group-2', second, changed=True)
+            self.checkpoint('group-2', second)
+            state = completion.audit('example')
+            self.assertEqual(len(state.records), 4)
+            self.assertEqual(len(state.group_records), 2)
+            for old, new in zip(state.records, state.records[1:]):
+                self.assertEqual(old['end_head'], new['start_head'])
+            self.assertIsNone(workflow.group_next('example')['group'])
+
+    def test_pending_checkpoint_partial_report_and_no_change_children(self) -> None:
+        import completion
+        with working_directory(self.repo):
+            token = self.assign()
+            self.complete_children('group-1', token)
+            facts = json.loads(completion.report('example'))
+            self.assertEqual(facts['pending_groups'], ['group-1', 'group-2'])
+            self.assertEqual(facts['pending'], ['child-2-1', 'child-2-2'])
+            self.assertEqual(facts['records'][0]['outcome'], 'no-change')
+            with self.assertRaisesRegex(StateError, 'unresolved'):
+                completion.audit('example')
+            self.checkpoint('group-1', token)
+            self.assertEqual(workflow.group_next('example')['group']['id'], 'group-2')
+
+    def test_checkpoint_write_interruption_before_and_after_markdown(self) -> None:
+        with working_directory(self.repo):
+            token = self.assign()
+            self.complete_children('group-1', token, changed=True)
+            workflow.group_release('example', 'group-1', token)
+            head = workflow.git_output(self.repo, 'rev-parse', 'HEAD')
+            with patch('workflow.replace_plan', side_effect=OSError('checkpoint write interrupted')):
+                with self.assertRaisesRegex(OSError, 'interrupted'):
+                    workflow.group_complete('example', 'group-1', token, accepted=True)
+            self.assertEqual(workflow.load(self.plan).active_group.phase, 'checkpointing')
+            real_save = workflow.save
+            def crash(path: Path, state: workflow.Execution) -> None:
+                if state.active_group is None:
+                    raise OSError('final journal write interrupted')
+                real_save(path, state)
+            with patch('workflow.save', side_effect=crash):
+                with self.assertRaisesRegex(OSError, 'interrupted'):
+                    workflow.group_complete('example', 'group-1', token, accepted=True)
+            self.assertTrue(workflow.read_plan(self.plan, workflow.git_context()).groups[0].completed)
+            with self.assertRaisesRegex(StateError, 'transaction|drift'):
+                workflow.group_next('example')
+            with patch('completion.verification', side_effect=AssertionError('must reuse journaled evidence')):
+                state = workflow.group_complete('example', 'group-1', token, accepted=True)
+            self.assertEqual(len(state.group_records), 1)
+            self.assertEqual(workflow.git_output(self.repo, 'rev-parse', 'HEAD'), head)
+
+    def test_failed_verification_retains_released_assignment_and_evidence(self) -> None:
+        with working_directory(self.repo):
+            self.plan.write_text(grouped_plan().replace('  - Verify: [', '  - Verify: [', 1))
+            token = self.assign()
+            self.complete_children('group-1', token)
+            workflow.group_release('example', 'group-1', token)
+            with patch('completion.verification', return_value={'argv': ['bad'], 'exit_code': 5, 'stderr': 'failure'}):
+                with self.assertRaisesRegex(StateError, 'verification failed'):
+                    workflow.group_complete('example', 'group-1', token, accepted=True)
+            state = workflow.load(self.plan)
+            self.assertEqual(state.active_group.phase, 'released')
+            self.assertEqual(state.active_group.evidence[0]['exit_code'], 5)
+            self.assertIn('failed', state.active_group.error)
+            self.assertFalse(workflow.read_plan(self.plan, workflow.git_context()).groups[0].completed)
+            workflow.group_complete('example', 'group-1', token, accepted=True)
+
+    def test_group_verification_mutation_is_preserved(self) -> None:
+        with working_directory(self.repo):
+            token = self.assign()
+            self.complete_children('group-1', token)
+            workflow.group_release('example', 'group-1', token)
+            def mutate(argv: list[str], path: Path) -> dict[str, object]:
+                (path / 'mutation.txt').write_text('retained evidence')
+                return {'argv': argv, 'exit_code': 0}
+            with patch('completion.verification', side_effect=mutate):
+                with self.assertRaisesRegex(StateError, 'mutated'):
+                    workflow.group_complete('example', 'group-1', token, accepted=True)
+            self.assertTrue((self.repo / 'mutation.txt').exists())
+            self.assertEqual(workflow.load(self.plan).active_group.phase, 'released')
+
+    def test_release_refuses_active_or_incomplete_children(self) -> None:
+        with working_directory(self.repo):
+            token = self.assign()
+            with self.assertRaisesRegex(StateError, 'every assigned child'):
+                workflow.group_release('example', 'group-1', token)
+            workflow.begin('example', group_id='group-1', assignment=token)
+            with self.assertRaisesRegex(StateError, 'child transaction'):
+                workflow.group_release('example', 'group-1', token)
+
+    def test_group_revisions_preserve_ids_membership_and_evidence(self) -> None:
+        with working_directory(self.repo):
+            token = self.assign()
+            self.complete_children('group-1', token)
+            self.checkpoint('group-1', token)
+            revision = self.root / 'revision.md'
+            revision.write_text(self.plan.read_text().replace('Use plain text files to persist results.',
+                                'Use plain text files. Approved decision: keep outputs UTF-8.'))
+            workflow.revise('example', revision)
+            self.assertIn('UTF-8', self.plan.read_text())
+            revision.write_text(self.plan.read_text().replace('Group: group-2', 'Group: renamed'))
+            with self.assertRaisesRegex(StateError, 'group IDs'):
+                workflow.revise('example', revision)
+            revision.write_text(self.plan.read_text().replace('child results work together.', 'changed acceptance', 1))
+            with self.assertRaisesRegex(StateError, 'completed group'):
+                workflow.revise('example', revision)
+            self.assertEqual(len(workflow.load(self.plan).group_records), 1)
+
+    def test_old_flat_journal_defaults_remain_usable(self) -> None:
+        import completion
+        with working_directory(self.repo):
+            workflow.start('example', runner=['unused'])
+            state = json.loads(workflow.state_path(self.plan).read_text())
+            for key in ('group_protocol', 'active_group', 'group_records'):
+                state.pop(key)
+            workflow.state_path(self.plan).write_text(json.dumps(state))
+            workflow.begin('example')
+            completion.complete('example')
+            workflow.begin('example')
+            completion.complete('example')
+            self.assertEqual(completion.audit('example').group_protocol, 0)
+
+    def test_child_checkpoint_recovery_keeps_assignment(self) -> None:
+        import completion
+        with working_directory(self.repo):
+            token = self.assign()
+            workflow.begin('example', group_id='group-1', assignment=token)
+            (self.repo / 'child.txt').write_text('child')
+            with patch('completion.replace_plan', side_effect=OSError('interrupted child')):
+                with self.assertRaises(OSError):
+                    completion.complete('example', group_id='group-1', assignment=token)
+            with self.assertRaisesRegex(StateError, 'stale'):
+                completion.complete('example', group_id='group-1', assignment='wrong')
+            state = completion.complete('example', group_id='group-1', assignment=token)
+            self.assertEqual(state.active_group.assignment, token)
+            self.assertEqual(len(state.records), 1)
+
+    def test_audit_detects_group_checkpoint_corruption(self) -> None:
+        import completion
+        with working_directory(self.repo):
+            token = self.assign()
+            self.complete_children('group-1', token)
+            self.checkpoint('group-1', token)
+            second = workflow.group_begin('example', 'group-2').active_group.assignment
+            self.complete_children('group-2', second)
+            state = self.checkpoint('group-2', second)
+            state.group_records[0]['accepted'] = False
+            workflow.save(self.plan, state)
+            with self.assertRaisesRegex(StateError, 'checkpoint differs'):
+                completion.audit('example')

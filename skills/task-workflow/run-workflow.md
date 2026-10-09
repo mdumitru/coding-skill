@@ -41,8 +41,9 @@ python3 <task-workflow-dir>/scripts/preview.py intent --execute-slug <slug> [-- 
 ```
 
 The intent lives beside the execution journal in `_plans/.state/` and survives
-retries and compaction; `workflow.py report` shows it as `run_intent`. After
-the execute workflow's final audit passes, run:
+retries and compaction; `workflow.py report` shows it as `run_intent`. For grouped plans, the coordinator retains this intent across fresh workers
+and manual fresh-session continuations. Workers never start previews. After
+every child and group checkpoint and the execute workflow's final audit pass, run:
 
 ```sh
 python3 <task-workflow-dir>/scripts/preview.py run --execute-slug <slug>

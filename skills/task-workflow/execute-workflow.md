@@ -30,7 +30,25 @@ reuse from launch location. Legacy plans can be migrated with
 before startup and validate with `--runtime`. Checked legacy tasks require
 real commit Outcomes and matching verification Evidence for adoption.
 
-## Execute one task at a time
+## Grouped execution
+
+For plans with Group IDs, read `group-execution.md` completely. This skill
+explicitly requests sequential delegation: automatically create one new worker
+with no conversation-history inheritance for each coherent group when the
+harness supports it. Pass scoped persisted context and required rules, use the
+one recorded worktree, wait for worker return, then verify and journal its group
+checkpoint before advancing. Keep investigation, diffs, and test logs in the
+worker/artifacts. Never reuse a completed group's worker for the next group.
+The coordinator owns final audit/report and preview intent. A failed or ambiguous
+operation stops advancement and preserves the exact assignment and journal.
+
+If the harness cannot create a confirmed fresh native worker, follow the
+one-group/manual fresh-session fallback in that reference. Never silently run
+all remaining groups in the current conversation or claim automatic isolation.
+For an existing assignment, resume only after confirming its previous worker
+has stopped; use the same group/token and recover pending transactions first.
+
+## Flat execution: one task at a time
 
 ```sh
 python3 <task-workflow-dir>/scripts/workflow.py begin <slug>
@@ -70,7 +88,7 @@ execute slugs stop the request before any work.
 
 ## Final checks and report
 
-After all tasks, run:
+After all tasks and (for grouped plans) every verified group checkpoint, run:
 
 ```sh
 python3 <task-workflow-dir>/scripts/plan_file.py validate <slug> --runtime
@@ -80,7 +98,7 @@ python3 <task-workflow-dir>/scripts/workflow.py report <slug> --markdown
 
 Run any additional final repository checks required by the plan. Audit requires
 successful ordered evidence, intact commit ancestry, clean matching identity,
-and no unresolved transaction. Report the canonical path, branch, and actual
+every required group checkpoint, and no unresolved transaction. Report the canonical path, branch, and actual
 commits from recorded facts. Stop without pushing, integrating, or removing
 the task. Only a later exact `finish` or `finish in <branch>` authorizes finish;
 a PR still requires a separate explicit request. Do not install into live
