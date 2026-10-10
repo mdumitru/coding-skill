@@ -34,6 +34,9 @@ Do not install agents, hooks, or live skills to obtain a missing capability.
    pending. Assess group Done when using persisted acceptance and reported facts;
    request clarification for material ambiguity. Persist approved handoff decisions
    in `## Context and decisions` through `workflow.py revise` before release.
+   If group acceptance or Verify needs more work, revise to append a fix-up
+   child to the group, then resume a worker with the same token. A released
+   group that gains a child returns to `assigned`; one being checkpointed cannot.
 7. After confirming the worker ended and semantic acceptance holds, call
    `group-release <slug> --group <id> --assignment <token>`, then
    `group-complete <slug> --group <id> --assignment <token> --accepted`.

@@ -534,6 +534,21 @@ def group_complete(slug: str, group_id: str, assignment: str, *, accepted: bool)
             raise
 
 
+def added_tasks(previous: Plan, proposed: Plan, state: Execution) -> set[str]:
+    """Return new task IDs; each must be pending and follow every completed or active task."""
+    known = [t.id for t in previous.tasks]
+    if [t.id for t in proposed.tasks if t.id in set(known)] != known:
+        raise StateError('revision must preserve stable task IDs and order')
+    positions = {t.id: i for i, t in enumerate(proposed.tasks)}
+    started = [t.id for t in previous.tasks if t.completed] + ([state.active.task_id] if state.active else [])
+    boundary = max((positions[i] for i in started), default=-1)
+    added = [t for t in proposed.tasks if t.id not in set(known)]
+    for task in added:
+        if task.completed or positions[task.id] < boundary:
+            raise StateError(f'added task {task.id} must be pending and follow every completed or active task')
+    return {t.id for t in added}
+
+
 def revise(slug: str, content_path: Path | None) -> Execution:
     """Record an approved pending-task decision without losing runtime evidence."""
     path, context = resolve_plan(slug)
@@ -560,24 +575,35 @@ def revise(slug: str, content_path: Path | None) -> Execution:
             proposed = parse_plan(content, is_faur=context.is_faur, runtime=True)
             if (proposed.worktree, proposed.launch_worktree, proposed.launch_branch) != (previous.worktree, previous.launch_worktree, previous.launch_branch):
                 raise StateError('revision must preserve worktree identity')
-            if [t.id for t in proposed.tasks] != [t.id for t in previous.tasks]:
-                raise StateError('revision must preserve stable task IDs and order')
-            if [(g.id, g.task_ids) for g in proposed.groups] != [(g.id, g.task_ids) for g in previous.groups]:
-                raise StateError('revision must preserve group IDs, order, and membership')
-            if state.active_group and state.active_group.phase != 'assigned':
-                raise StateError('finish released/checkpointing group before revising')
+            added = added_tasks(previous, proposed, state)
+            if [(g.id, [i for i in g.task_ids if i not in added]) for g in proposed.groups] != [(g.id, g.task_ids) for g in previous.groups]:
+                raise StateError('revision must preserve group IDs, order, and membership; it may only add children')
+            active_group = state.active_group
+            reopened = active_group is not None and active_group.phase == 'released' and any(
+                t.id in added and t.group_id == active_group.group_id for t in proposed.tasks)
+            if active_group and active_group.phase != 'assigned' and not reopened:
+                raise StateError('finish released/checkpointing group before revising, or add a fix-up child to it')
             for old_group, new_group in zip(previous.groups, proposed.groups):
                 old_fields = {k: v for k, v in asdict(old_group).items() if k not in {'line', 'end'}}
                 new_fields = {k: v for k, v in asdict(new_group).items() if k not in {'line', 'end'}}
                 if old_group.completed != new_group.completed or (old_group.completed and old_fields != new_fields):
                     raise StateError('revision must preserve completed group content/evidence and checked state')
-            for old, new in zip(previous.tasks, proposed.tasks):
+            proposed_tasks = {t.id: t for t in proposed.tasks}
+            for old in previous.tasks:
+                new = proposed_tasks[old.id]
                 if old.completed != new.completed:
                     raise StateError('revision cannot change checked state')
                 old_fields = {k: v for k, v in asdict(old).items() if k not in {'line', 'end'}}
                 new_fields = {k: v for k, v in asdict(new).items() if k not in {'line', 'end'}}
                 if old.completed and old_fields != new_fields:
                     raise StateError('revision cannot change completed task evidence/content')
+            if reopened:
+                # A released group that gains a fix-up child goes back to its worker; no checkpoint exists yet.
+                assert active_group
+                LOGGER.info('reopening released group %s for added children', active_group.group_id)
+                active_group.phase = 'assigned'
+                active_group.evidence = []
+                active_group.error = None
             state.revision = content
             state.pending_digest = proposed.digest
             state.phase = 'revising'

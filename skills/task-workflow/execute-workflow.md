@@ -60,7 +60,8 @@ journals start HEAD. Implement that task within its allowed Paths. Evaluate
 its Done when condition semantically. If materially ambiguous, stop and ask;
 preserve the journal, put the approved decision in scratch Markdown, and call
 `workflow.py revise <slug> --content <scratch-file>` before resuming. Revisions
-preserve stable IDs/order, identity, checked state, and completed evidence.
+preserve stable IDs/order, identity, checked state, and completed evidence; they
+may add new pending tasks after every completed or active task.
 Do not bypass drift checks or discard diagnostic state.
 
 After semantic acceptance, run:

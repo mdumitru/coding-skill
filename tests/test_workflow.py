@@ -18,6 +18,7 @@ from tests.test_plan_file import RepositoryFixture, run_git
 SCRIPTS = Path(__file__).parents[1] / 'skills/task-workflow/scripts'
 sys.path.insert(0, str(SCRIPTS))
 import workflow
+from plan_file import PlanFileError
 from state_io import StateError
 
 
@@ -678,6 +679,52 @@ class GroupTransactionTests(unittest.TestCase):
             with self.assertRaisesRegex(StateError, 'completed group'):
                 workflow.revise('example', revision)
             self.assertEqual(len(workflow.load(self.plan).group_records), 1)
+
+    def test_revision_adds_child_to_assigned_group(self) -> None:
+        from completion import complete
+        def child(n: int, mark: str = ' ') -> str:
+            return (f'  - [{mark}] Child 1/{n}\n    - Task: child-1-{n}\n    - Commit: implement child 1 {n}\n'
+                    f'    - Paths: ["*.txt"]\n    - Verify: {json.dumps([sys.executable, "-c", "print(123)"])}\n'
+                    '    - Done when: child acceptance holds.\n')
+        with working_directory(self.repo):
+            token = self.assign()
+            self.complete_children('group-1', token, changed=True)
+            revision = self.root / 'revision.md'
+            text = self.plan.read_text()
+            for bad, message in [(text.replace('- [ ] Group 2', child(3, 'x') + '- [ ] Group 2'), 'completion'),
+                                 (text.replace('  - [x] Child 1/1', child(3) + '  - [x] Child 1/1'), 'completion'),
+                                 (text.replace('child-2-1', 'child-1-3'), 'task IDs')]:
+                revision.write_text(bad)
+                with self.assertRaisesRegex((StateError, PlanFileError), message):
+                    workflow.revise('example', revision)
+            revision.write_text(text.replace('- [ ] Group 2', child(3) + '- [ ] Group 2'))
+            workflow.revise('example', revision)
+            with self.assertRaisesRegex(StateError, 'every assigned child'):
+                workflow.group_release('example', 'group-1', token)
+            self.assertEqual(workflow.begin('example', group_id='group-1', assignment=token).active.task_id, 'child-1-3')
+            revision.write_text(self.plan.read_text().replace('  - [ ] Child 1/3', child(4) + '  - [ ] Child 1/3'))
+            with self.assertRaisesRegex(StateError, 'follow every completed or active'):
+                workflow.revise('example', revision)
+            (self.repo / 'group-1-3.txt').write_text('fix-up\n')
+            complete('example', group_id='group-1', assignment=token)
+            workflow.group_release('example', 'group-1', token)
+            with patch('completion.verification', return_value={'argv': [], 'exit_code': 1}):
+                with self.assertRaisesRegex(StateError, 'verification failed'):
+                    workflow.group_complete('example', 'group-1', token, accepted=True)
+            revision.write_text(self.plan.read_text().replace('persist results.', 'persist UTF-8 results.'))
+            with self.assertRaisesRegex(StateError, 'fix-up child'):
+                workflow.revise('example', revision)
+            revision.write_text(self.plan.read_text().replace('- [ ] Group 2', child(4) + '- [ ] Group 2'))
+            reopened = workflow.revise('example', revision).active_group
+            self.assertEqual((reopened.assignment, reopened.phase, reopened.error), (token, 'assigned', None))
+            workflow.begin('example', group_id='group-1', assignment=token)
+            (self.repo / 'group-1-4.txt').write_text('fix-up\n')
+            complete('example', group_id='group-1', assignment=token)
+            state = self.checkpoint('group-1', token)
+            self.assertEqual(state.group_records[0]['task_ids'], [f'child-1-{n}' for n in range(1, 5)])
+            revision.write_text(self.plan.read_text().replace('- [ ] Group 2', child(5) + '- [ ] Group 2'))
+            with self.assertRaisesRegex(PlanFileError, 'completion state for group group-1'):
+                workflow.revise('example', revision)
 
     def test_old_flat_journal_defaults_remain_usable(self) -> None:
         import completion

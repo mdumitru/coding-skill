@@ -93,8 +93,12 @@ publishing remain separate explicitly requested actions.
 Approved changes to pending-task details or decision prose use
 `workflow.py revise <slug> --content <scratch-file>` while the plan matches its
 recorded state. Revision preserves identity, task IDs/order, checked state, and
-completed-task records. It refuses a completion transaction in progress and
-journals its own replacement. Retry `revise <slug>` without --content to finish
+completed-task records. It may add new pending tasks after every completed or
+active task, including fix-up children of a pending, assigned, or released
+group. Adding one to the released group returns its assignment to `assigned`
+under the same token. Group IDs, order, and existing membership stay fixed.
+It refuses a completion transaction in progress and journals its own
+replacement. Retry `revise <slug>` without --content to finish
 an interrupted approved revision; it never adopts unrelated drift.
 
 # Execution groups (opt-in grammar)
