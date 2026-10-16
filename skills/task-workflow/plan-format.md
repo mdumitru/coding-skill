@@ -72,8 +72,12 @@ records include argv, exit status, bounded output, and a full-output digest.
 Unexpected verification mutations stop completion and remain available for
 review. Only allowed changes are staged. Commit intent records start HEAD and
 expected tree before Git runs; retries reconcile the one matching commit.
-Failed commits retain staging and diagnostics. No-change tasks need successful
-verification and record `no-change`, keeping HEAD intact.
+Failed commits retain staging and diagnostics. If a hook reports a correctable
+problem, edit only the original task paths and re-run `complete`; the runner
+repeats verification, stages the corrected content, and replaces the commit
+intent before retrying Git. Unexplained transaction drift remains refused.
+No-change tasks need successful verification and record `no-change`, keeping
+HEAD intact.
 
 Both the commit and Markdown replacement are journaled. Re-run `complete` after
 an interrupted transaction; it verifies identity, tree, subject, and ancestry

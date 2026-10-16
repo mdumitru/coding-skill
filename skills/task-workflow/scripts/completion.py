@@ -69,12 +69,12 @@ def inspect(path: Path) -> Changes:
     return Changes(changed_paths, sorted(staged), sorted(unstaged), digest.hexdigest(), content_digest(path, changed_paths))
 
 
-def guard(changes: Changes, task: Task) -> None:
+def guard(changes: Changes, task: Task, *, allow_partial: bool = False) -> None:
     unexpected = [p for p in changes.paths if forbidden_path(p) or not any(fnmatch.fnmatchcase(p, pattern) for pattern in task.paths)]
     if unexpected:
         raise StateError(f'unauthorized changed/staged paths: {", ".join(unexpected)}')
     partial = sorted(set(changes.staged) & set(changes.unstaged))
-    if partial:
+    if partial and not allow_partial:
         raise StateError(f'partial staging refused; preserve and review files: {", ".join(partial)}')
 
 
@@ -223,9 +223,71 @@ def complete(slug: str, *, group_id: str | None = None, assignment: str | None =
                 elif active.phase == 'committed':
                     raise StateError('recorded commit is missing or history was rewritten')
                 else:
-                    # Commit failed or was interrupted before Git mutation. Keep staging for retry.
-                    if git_output(worktree, 'write-tree') != active.tree:
+                    # An interrupted commit must retain its exact intent. A known failed
+                    # commit may instead be corrected on the same task paths, but the
+                    # corrected content is reverified before replacing that intent.
+                    current = inspect(worktree)
+                    intent_matches = (
+                        not current.unstaged
+                        and current.paths == active.changes
+                        and current.staged == active.changes
+                        and git_output(worktree, 'write-tree') == active.tree
+                    )
+                    legacy_commit_failure = bool(
+                        active.error and active.error.startswith('commit failed;')
+                    )
+                    if not intent_matches and not (
+                        active.commit_failed or legacy_commit_failure
+                    ):
                         raise StateError('staged tree drift since commit intent')
+                    if not intent_matches:
+                        guard(current, task, allow_partial=True)
+                        if current.paths != active.changes:
+                            raise StateError(
+                                'failed-commit correction must preserve the original task paths'
+                            )
+                        refreshed_evidence: list[dict[str, object]] = []
+                        for argv in task.verify:
+                            entry = verification(argv, worktree)
+                            refreshed_evidence.append(entry)
+                            if entry['exit_code'] != 0:
+                                active.evidence = refreshed_evidence
+                                runtime.save(path, state)
+                                raise StateError(
+                                    f'verification failed for {argv}: {entry.get("stderr", "")}'
+                                )
+                        if path.read_text() != plan.content:
+                            raise StateError('plan drift during failed-commit recovery')
+                        after = inspect(worktree)
+                        guard(after, task, allow_partial=True)
+                        if after != current:
+                            raise StateError(
+                                'verification mutated task files/staging; review changes and retry'
+                            )
+                        if git_output(worktree, 'rev-parse', 'HEAD') != active.start_head:
+                            raise StateError('verification changed HEAD')
+                        subprocess.run(
+                            ['git', 'add', '--all', '--', *active.changes],
+                            cwd=worktree,
+                            check=True,
+                            capture_output=True,
+                        )
+                        staged = inspect(worktree)
+                        guard(staged, task)
+                        if (
+                            staged.unstaged
+                            or staged.paths != active.changes
+                            or staged.staged != active.changes
+                            or staged.content_digest != current.content_digest
+                        ):
+                            raise StateError(
+                                'failed-commit correction drifted or staging is incomplete'
+                            )
+                        active.evidence = refreshed_evidence
+                        active.tree = git_output(worktree, 'write-tree')
+                        active.error = None
+                        active.commit_failed = False
+                        runtime.save(path, state)
                 if active.phase == 'committed':
                     if not runtime.clean(worktree):
                         raise StateError('worktree changed after commit; preserve journal and changes')
@@ -288,6 +350,7 @@ def complete(slug: str, *, group_id: str | None = None, assignment: str | None =
                 runtime.save(path, state)
             result = subprocess.run(['git', 'commit', '-m', str(task.commit)], cwd=worktree, capture_output=True, text=True)
             if result.returncode:
+                active.commit_failed = True
                 raise StateError(f'commit failed; pending task and staged work retained: {result.stderr.strip()}')
             commit = git_output(worktree, 'rev-parse', 'HEAD')
             facts = commit_facts(worktree, commit)

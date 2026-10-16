@@ -290,6 +290,39 @@ class CompletionTests(unittest.TestCase):
             self.assertEqual(len(state.records), 1)
             self.assertIsNone(state.active)
 
+    def test_failed_commit_can_reverify_a_correction_on_the_same_paths(self) -> None:
+        from completion import complete
+        with working_directory(self.repo):
+            self.plan.write_text(
+                executable_plan(count=1).replace(
+                    'print(123)',
+                    'print(open(\\"change.txt\\").read().strip())',
+                )
+            )
+            self.start_begin()
+            hook = self.repo / '.git/hooks/pre-commit'
+            hook.write_text('#!/bin/sh\ngrep -qx good change.txt\n')
+            hook.chmod(0o755)
+            changed = self.repo / 'change.txt'
+            changed.write_text('bad\n')
+            with self.assertRaisesRegex(StateError, 'commit failed'):
+                complete('example')
+            failed = workflow.load(self.plan)
+            self.assertTrue(failed.active.commit_failed)
+            failed_tree = failed.active.tree
+
+            # Editing a staged path leaves a partial index/worktree state. Recovery
+            # must reverify and restage it instead of requiring the failed tree.
+            changed.write_text('good\n')
+            state = complete('example')
+
+            self.assertEqual(len(state.records), 1)
+            self.assertNotEqual(state.records[0]['tree'], failed_tree)
+            self.assertEqual(state.records[0]['evidence'][0]['stdout'], 'good\n')
+            self.assertEqual(
+                workflow.git_output(self.repo, 'show', 'HEAD:change.txt'), 'good'
+            )
+
     def test_crash_after_git_commit_and_after_markdown_replacement(self) -> None:
         import completion
         with working_directory(self.repo):

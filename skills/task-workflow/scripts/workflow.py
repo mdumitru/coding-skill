@@ -39,6 +39,7 @@ class ActiveTask:
     evidence: list[dict[str, object]] = field(default_factory=list)
     changes: list[str] = field(default_factory=list)
     error: str | None = None
+    commit_failed: bool = False
 
 
 @dataclass
@@ -140,6 +141,8 @@ def load(plan: Path) -> Execution:
             string_value(state.active.start_head, 'active start HEAD')
             if not isinstance(state.active.evidence, list) or not isinstance(state.active.changes, list) or any(not isinstance(x, str) for x in state.active.changes):
                 raise StateError('invalid active evidence/paths')
+            if type(state.active.commit_failed) is not bool:
+                raise StateError('invalid active commit failure marker')
         return state
     except (OSError, ValueError, TypeError) as exc:
         raise StateError(f'cannot read execution state: {exc}') from exc
