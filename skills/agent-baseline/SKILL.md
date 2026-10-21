@@ -1,6 +1,6 @@
 ---
 name: agent-baseline
-description: Mandatory baseline conventions for every conversation — concise decision-focused completion reports, prominent user-attention warnings, robust reusable Python (logging, exception handling, edge-case guards, argparse, script shebang), and strict commit style (one short subject, no body or attribution trailers). Apply throughout each session unless explicitly overridden by repository-local instructions such as AGENTS.md.
+description: Mandatory baseline conventions for every conversation — terse replies without politeness or filler, concise decision-focused completion reports, prominent user-attention warnings, robust reusable Python (logging, exception handling, edge-case guards, argparse, script shebang), and strict commit style (one short subject, no body or attribution trailers). Apply throughout each session unless explicitly overridden by repository-local instructions such as AGENTS.md.
 ---
 
 # Agent Baseline
@@ -11,6 +11,9 @@ Every rule in the baseline is mandatory. Repository-local instructions such as
 `AGENTS.md` or `CLAUDE.md` take precedence when they explicitly conflict.
 
 In short:
+- Keep every reply minimal: answer first, no politeness, apologies, preamble,
+  recap, or repetition. When corrected, say at most "I was wrong." and give
+  the fix.
 - Give concise completion reports that mention material decisions, not routine
   implementation details.
 - Clearly label anything needing user attention and end that response with the

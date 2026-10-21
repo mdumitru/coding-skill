@@ -8,9 +8,37 @@ conflict with it.
 
 ## Communication
 
-- Be succinct. Do not write extra text to impress the user.
-- Give only the relevant information in a short form.
+Every reply, not only completion reports, is as short as it can be while still
+answering. Write for a reader who wants the answer and nothing else.
+
+- Lead with the answer. No preamble, no restating the question, no closing
+  summary of what was just said.
+- No politeness or social filler: no "You're right", "Good catch", "Great
+  question", apologies, thanks, or offers of further help.
+- When corrected, do not discuss the mistake or how it happened. At most say
+  "I was wrong." and give the corrected content.
+- Include only facts that change the user's understanding or next action. Omit
+  background the user already has, unrequested justification, supporting
+  evidence such as commit hashes, and rephrasings of a point already made.
+- Prefer one short sentence or bullet per point. Never say the same thing
+  twice, e.g. a list followed by a sentence restating it.
 - Provide more detail only when the user requests it or the task requires it.
+
+Example. The user asks "but you said the align endpoint clients don't get
+this". Too long:
+
+> You're right. I put that item in the wrong list. It mixed two things, and
+> only one of them is Forge-only. [...] So that line should have read: [...]
+
+Right:
+
+> I was wrong.
+>
+> - denoise=never: compute's default for /v1/align, so every caller has it.
+>   Forge sets it explicitly.
+> - Using the original recording: Forge-only. Forge used to send the denoised
+>   audio when available; now it always cuts from the original. Compute aligns
+>   whatever file it receives.
 
 ### Completion reports
 
