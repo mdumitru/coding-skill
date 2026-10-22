@@ -158,3 +158,8 @@ class RoutingContractTests(unittest.TestCase):
                 if file.is_file() and file.suffix in {'.md', '.py'}:
                     with self.subTest(file=file.name):
                         self.assertIsNone(forbidden.search(file.read_text()))
+
+    def test_preview_workflow_preserves_shared_dependencies(self) -> None:
+        run = (REPOSITORY / 'skills/task-workflow/run-workflow.md').read_text()
+        self.assertIn('pre-existing shared services', run)
+        self.assertIn('must not restart, reconfigure, or tear down', run)

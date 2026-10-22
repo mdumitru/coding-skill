@@ -96,6 +96,14 @@ a retry after interrupted startup reuses partial resources. Diagnostics go to
 stderr; credentials never appear in output. The runtime ID is also exported as
 `WORKTREE_RUNTIME_ID` for adapters to echo.
 
+Adapters may connect previews to pre-existing shared services. They configure
+the preview-side routing and probe/report those dependencies, but a preview
+lifecycle must not restart, reconfigure, or tear down a shared service. Only
+resources created for the runtime are owned by `stop --teardown`. If a shared
+dependency cannot provide complete application behavior, report that fact in
+`readiness.detail` and application-specific `details`; the repository's live
+acceptance test owns deeper functional verification.
+
 ## Response envelope
 
 ```json

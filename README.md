@@ -205,11 +205,13 @@ starts the preview only after the execution's final audit; retries reuse it.
 A run never creates a worktree, commits, or changes plan checkboxes, so it can
 preview uncommitted edits.
 
-A repository opts in with real executables in  `worktree-tools/`: `start`,
+A repository opts in with real executables in `worktree-tools/`: `start`,
 `status`, `logs`, `stop`, and `reset` plus `worktree-tools/protocol.json`
 (schema version, adapter kind, optional declared start options and pairing
-group). The executables own dependencies, ports, configuration, data,
-processes, and cleanup; the skills stay generic. Repository start options
+group). The executables own runtime-specific ports, configuration, data,
+processes, and cleanup; the skills stay generic. They may configure and probe
+pre-existing shared dependencies, but never restart, reconfigure, or tear
+those services down as part of a preview lifecycle. Repository start options
 follow `--`:
 
 ```sh
