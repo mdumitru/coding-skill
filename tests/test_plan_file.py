@@ -557,3 +557,86 @@ class GroupedPlanTests(unittest.TestCase):
                        cwd=repository, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)['group_id'], 'inputs')
+
+
+DONE_PLAN = "Worktree: `{slug}`\n- [x] completed\n  - Done when: completed condition holds\n"
+
+
+class PrunePlansTests(unittest.TestCase):
+    """Prune only completed plans whose worktree, branch, and preview are gone."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.workspace, self.worktree = RepositoryFixture(Path(self.temp_dir.name)).faur()
+        self.plans = self.workspace / "_plans"
+        (self.plans / ".state").mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def plan(self, slug: str, body: str | None = None) -> Path:
+        path = self.plans / f"{slug}.md"
+        path.write_text("# TODO: fixture\n" + (body or DONE_PLAN.format(slug=slug)), encoding="utf-8")
+        return path
+
+    def journal(self, slug: str, **fields: object) -> Path:
+        path = self.plans / ".state" / f"{slug}.json"
+        path.write_text(json.dumps(fields), encoding="utf-8")
+        return path
+
+    def reasons(self, report: dict[str, object]) -> dict[str, str]:
+        return {item["slug"]: item["reason"] for item in report["skipped"]}
+
+    def test_dry_run_lists_without_deleting(self) -> None:
+        plan = self.plan("gone")
+        report = plan_file.prune_plans(cwd=self.worktree)
+        self.assertEqual([c["slug"] for c in report["candidates"]], ["gone"])
+        self.assertEqual(report["deleted"], [])
+        self.assertTrue(plan.exists())
+
+    def test_apply_deletes_plan_and_journal(self) -> None:
+        plan = self.plan("gone")
+        journal = self.journal("gone", identity={"branch": "gone", "path": str(self.workspace / "gone")})
+        report = plan_file.prune_plans(cwd=self.worktree, apply=True)
+        self.assertEqual([d["slug"] for d in report["deleted"]], ["gone"])
+        self.assertFalse(plan.exists())
+        self.assertFalse(journal.exists())
+        self.assertFalse((self.plans / ".state" / "gone.lock").exists())
+
+    def test_blockers_are_reported_and_preserved(self) -> None:
+        self.plan("pending", "Worktree: `pending`\n- [ ] work\n  - Done when: done\n")
+        self.plan("broken", "Worktree: `broken`\n- [x] work\n  - Verify: not json\n")
+        self.plan("live")
+        run_git("worktree", "add", "--quiet", "-b", "live", str(self.workspace / "live"), cwd=self.worktree)
+        self.plan("branch")
+        run_git("branch", "branch", cwd=self.worktree)
+        self.plan("preview")
+        (self.workspace / "_runs" / "preview").mkdir(parents=True)
+        self.plan("active")
+        self.journal("active", active={"task_id": "x"}, identity=None)
+        self.plan("renamed")
+        self.journal("renamed", identity={"branch": "main", "path": str(self.workspace / "renamed-2")})
+        self.plan("locked")
+        (self.plans / ".state" / "locked.lock").write_text("{}", encoding="utf-8")
+
+        report = plan_file.prune_plans(cwd=self.worktree, apply=True)
+        reasons = self.reasons(report)
+        self.assertEqual(report["deleted"], [])
+        self.assertEqual(reasons["pending"], "plan has pending tasks or groups")
+        self.assertIn("does not parse", reasons["broken"])
+        self.assertEqual(reasons["live"], "worktree still exists")
+        self.assertEqual(reasons["branch"], "branch still exists")
+        self.assertIn("preview runtime state remains", reasons["preview"])
+        self.assertEqual(reasons["active"], "execution journal has an unfinished transaction")
+        self.assertEqual(reasons["renamed"], "branch still exists")
+        self.assertEqual(reasons["locked"], "plan is locked")
+        self.assertEqual(len(list(self.plans.glob("*.md"))), 8)
+
+    def test_cli_requires_yes_to_delete(self) -> None:
+        plan = self.plan("gone")
+        for argv, exists in ((["prune"], True), (["prune", "--yes"], False)):
+            with self.subTest(argv=argv):
+                result = subprocess.run([sys.executable, str(HELPER), *argv], cwd=self.worktree, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["applied"], not exists)
+                self.assertEqual(plan.exists(), exists)

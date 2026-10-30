@@ -39,6 +39,13 @@ External runtime records and exclusive per-plan locks live in `_plans/.state/`.
 A stale lock must be inspected using its PID; preserve evidence before explicit
 removal. Never automatically clear locks or overwrite drifted plans.
 
+`prune` lists, as JSON, completed plans (every task and group checked) whose
+task worktree and local branch are both gone, preferring the execution journal's
+recorded identity over the `Worktree:` slug. Plans that do not parse, are
+locked, have an unfinished journal transaction, or still have preview runtime
+state are skipped with a reason. Only `prune --yes` deletes the listed plans
+and their journals, re-checking each under its plan lock.
+
 # Startup and selection
 
 `workflow.py start <slug>` requires an executable plan. Plain repositories work

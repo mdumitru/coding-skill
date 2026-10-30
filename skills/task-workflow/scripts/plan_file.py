@@ -419,6 +419,127 @@ def validate_plan(slug: str, *, cwd: Path | None = None, runtime: bool = False) 
     return ValidationResult(str(path), context.is_faur, plan.worktree, TaskCounts(len(plan.tasks), len(plan.tasks) - completed, completed), TaskCounts(len(plan.groups), len(plan.groups) - groups_done, groups_done))
 
 
+@dataclass(frozen=True)
+class PruneTarget:
+    slug: str
+    path: str
+    branch: str | None
+    worktree: str | None
+    reason: str | None
+
+
+def registered_worktrees(cwd: Path) -> tuple[set[Path], set[str]]:
+    paths: set[Path] = set()
+    branches: set[str] = set()
+    for line in git_output(cwd, 'worktree', 'list', '--porcelain').splitlines():
+        if line.startswith('worktree '):
+            paths.add(Path(line.removeprefix('worktree ')).resolve())
+        elif line.startswith('branch refs/heads/'):
+            branches.add(line.removeprefix('branch refs/heads/'))
+    return paths, branches
+
+
+def branch_exists(cwd: Path, branch: str) -> bool:
+    result = subprocess.run(['git', 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}'], cwd=cwd, capture_output=True, text=True)
+    if result.returncode not in {0, 1}:
+        raise PlanFileError(f'cannot inspect branch {branch}: {result.stderr.strip()}')
+    return result.returncode == 0
+
+
+def journal_identity(journal: Path) -> tuple[str | None, str | None, str | None]:
+    """Return (branch, path, blocker) from an execution journal, if one exists."""
+    if journal.is_symlink():
+        return None, None, 'execution journal is a symlink'
+    if not journal.exists():
+        return None, None, None
+    try:
+        data = json.loads(journal.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, ValueError) as exc:
+        return None, None, f'execution journal is unreadable: {exc}'
+    if not isinstance(data, dict):
+        return None, None, 'execution journal is not an object'
+    if any(data.get(key) is not None for key in ('active', 'active_group', 'pending_digest', 'revision')):
+        return None, None, 'execution journal has an unfinished transaction'
+    identity = data.get('identity')
+    if identity is None:
+        return None, None, None
+    if not isinstance(identity, dict) or not all(isinstance(identity.get(k), str) and identity.get(k) for k in ('branch', 'path')):
+        return None, None, 'execution journal identity is malformed'
+    return identity['branch'], identity['path'], None
+
+
+def prune_target(path: Path, context: GitContext, cwd: Path, live: tuple[set[Path], set[str]], *, holding_lock: bool = False) -> PruneTarget:
+    """Decide whether one plan is complete and fully detached from Git and preview state."""
+    slug = path.stem
+    root = context.plan_root.parent
+    state = context.plan_root / '.state'
+
+    def skip(reason: str, branch: str | None = None, worktree: str | None = None) -> PruneTarget:
+        return PruneTarget(slug, str(path), branch, worktree, reason)
+
+    if path.is_symlink() or not path.is_file():
+        return skip('plan is not a regular file')
+    if not SLUG_RE.fullmatch(slug):
+        return skip('plan name is not a valid slug')
+    try:
+        plan = read_plan(path, context)
+    except PlanFileError as exc:
+        return skip(f'plan does not parse: {exc}')
+    if not plan.tasks:
+        return skip('plan has no tasks')
+    if any(not t.completed for t in plan.tasks) or any(not g.completed for g in plan.groups):
+        return skip('plan has pending tasks or groups')
+    branch, worktree, blocker = journal_identity(state / f'{slug}.json')
+    if blocker:
+        return skip(blocker)
+    if branch is None:
+        if plan.worktree is None:
+            return skip('plan records no worktree')
+        branch, worktree = plan.worktree, str(root / plan.worktree)
+    if not holding_lock and (state / f'{slug}.lock').exists():
+        return skip('plan is locked', branch, worktree)
+    paths, branches = live
+    if worktree is not None and (Path(worktree).exists() or Path(worktree).resolve() in paths):
+        return skip('worktree still exists', branch, worktree)
+    if branch in branches or branch_exists(cwd, branch):
+        return skip('branch still exists', branch, worktree)
+    runs = root / ('_runs' if context.is_faur else '.worktree-runs') / slug
+    if runs.exists() or runs.is_symlink():
+        return skip(f'preview runtime state remains: {runs}', branch, worktree)
+    return PruneTarget(slug, str(path), branch, worktree, None)
+
+
+def prune_plans(*, cwd: Path | None = None, apply: bool = False) -> dict[str, object]:
+    """Report, and with apply delete, completed plans whose worktree and branch are gone."""
+    start = (cwd or Path.cwd()).resolve()
+    context = git_context(start)
+    if not context.plan_root.is_dir():
+        return {'applied': apply, 'deleted': [], 'candidates': [], 'skipped': []}
+    live = registered_worktrees(start)
+    targets = [prune_target(p, context, start, live) for p in sorted(context.plan_root.glob('*.md'))]
+    candidates = [t for t in targets if t.reason is None]
+    skipped = [asdict(t) for t in targets if t.reason is not None]
+    deleted: list[dict[str, object]] = []
+    if apply:
+        for target in candidates:
+            path = Path(target.path)
+            try:
+                with plan_lock(path):
+                    # Re-decide under the lock so a concurrent start or edit wins.
+                    current = prune_target(path, context, start, registered_worktrees(start), holding_lock=True)
+                    if current.reason is not None:
+                        skipped.append(asdict(current))
+                        continue
+                    (context.plan_root / '.state' / f'{target.slug}.json').unlink(missing_ok=True)
+                    path.unlink()
+            except (StateError, OSError) as exc:
+                skipped.append(asdict(PruneTarget(target.slug, target.path, target.branch, target.worktree, f'deletion failed: {exc}')))
+                continue
+            LOGGER.info('deleted plan %s', target.slug)
+            deleted.append(asdict(target))
+    return {'applied': apply, 'deleted': deleted, 'candidates': [asdict(t) for t in candidates], 'skipped': skipped}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='operation', required=True)
@@ -433,6 +554,8 @@ def build_parser() -> argparse.ArgumentParser:
         elif name == 'init':
             p.add_argument('--content', type=Path, help='UTF-8 Markdown input file')
             p.add_argument('--migrate', action='store_true', help='add stable IDs to an existing plan')
+    prune = sub.add_parser('prune', help='list completed plans whose worktree and branch are gone')
+    prune.add_argument('--yes', action='store_true', help='delete the listed plans and their execution journals')
     return parser
 
 
@@ -444,6 +567,9 @@ def main(argv: list[str] | None = None) -> int:
             # Completion is a transaction, never an arbitrary checkbox mutation.
             from workflow import main as workflow_main
             return workflow_main(['complete', args.slug])
+        if args.operation == 'prune':
+            print(json.dumps(prune_plans(apply=args.yes), sort_keys=True))
+            return 0
         path, context = resolve_plan(args.slug, create_parent=args.operation == 'init' or (args.operation == 'resolve' and args.create_parent))
         if args.operation == 'resolve':
             print(json.dumps({'path': str(path), 'plan_root': str(context.plan_root), 'faur': context.is_faur}, sort_keys=True) if args.json else path)
