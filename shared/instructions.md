@@ -14,31 +14,27 @@ Source repo: `~/gits/coding-skill`.
 ## Worktrees
 
 I work in a `faur-git` workspace (`.bare/` + `_shared/` + `_plans/` +
-worktrees, managed by the `faur` CLI). The agent may be launched from any
-worktree, including an existing task worktree. Its location never authorizes
-doing a new task there: the launch worktree is for reading and later
-integration only.
-
-Before modifying any tracked file in a faur workspace, read the
-`worktree-workflow` skill. For ordinary changes, use `faur worktree context
---json`, then `faur worktree add <slug> --task --unique --json`. Faur resolves
-context, chooses a free slug, and stores launch/task identity. Use the returned
-canonical task path for every edit, command, and commit. For `execute:`, the
-`task-workflow` runner calls faur and journals plan progress, verification,
-and commits; do not create another worktree or mark checkboxes by hand.
-One request, one task worktree, however small the change. New plans use coherent
-execution groups with commit-sized children. For grouped `execute:`, explicitly
-delegate one fresh sequential worker per group when supported; workers resume
-that same identity. Persist decisions in the plan and verify group checkpoints
-before advancing. Without fresh-worker support, checkpoint one group and return
+worktrees, managed by the `faur` CLI). Only `execute:` creates a task
+worktree: its `task-workflow` runner calls faur and journals plan progress,
+verification, and commits; do not create another worktree or mark checkboxes
+by hand. One `execute:`, one task worktree. New plans use coherent execution
+groups with commit-sized children. For grouped `execute:`, explicitly delegate
+one fresh sequential worker per group when supported; workers resume that same
+identity. Persist decisions in the plan and verify group checkpoints before
+advancing. Without fresh-worker support, checkpoint one group and return
 fresh-session continuation instructions. These context boundaries do not clear
 the parent conversation; detailed coordination stays in `task-workflow`.
 
-Exceptions: read-only tasks (including `plan:`), repos that are not faur
-workspaces, and an explicit instruction to work "here" or in a named existing
-worktree. Being launched from a non-main or task worktree is not an exception.
-Never push, open a PR, integrate, or remove a worktree unless I ask. After a
-task is complete, only a new message exactly saying `finish` or `finish in
+Every other request (("do X")) works in place on the contextual branch, never in
+a new worktree or branch: the task worktree of this conversation's most recent
+`execute:`, even if I launched you from `main`; otherwise the worktree you were
+launched from, whatever its branch. An explicit "here" or a named existing
+worktree overrides both. Before modifying tracked files in a faur workspace,
+read the `worktree-workflow` skill and confirm the target with `faur worktree
+context --json`; edit, verify, and commit there.
+
+Never push, open a PR, integrate, or remove a worktree unless I ask. After an
+`execute:` task is complete, only a new message exactly saying `finish` or `finish in
 <branch>` authorizes the finish workflow documented by the `worktree-workflow`
 skill: its wrapper runs faur's dry-run, tears down the task's repository
 previews, and only then runs `faur worktree finish`. A teardown failure blocks

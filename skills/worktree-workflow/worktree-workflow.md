@@ -4,48 +4,53 @@ Faur owns canonical context, collision selection, creation, durable launch/task
 identity, and integration/removal. Consume its version 1 JSON object responses;
 never parse the inventory array to choose a worktree or reconstruct paths.
 
-## Isolate an ordinary change
+## Choose the contextual worktree
 
-Before any tracked-file mutation in a faur workspace, however small:
+Only `execute:` creates a task worktree; the task-workflow skill's
+start/begin/complete runner owns those faur calls and its external plan/state
+mutations. Do not create a second worktree before calling start. Keep one task
+worktree per `execute:`, including when the agent was launched from another
+existing task worktree.
+
+Every other request modifies files in place on the contextual branch and never
+creates a worktree or branch. Resolve it in this order:
+
+1. a worktree the user explicitly names, or "here" (the launch worktree);
+2. the recorded task worktree of this conversation's most recent `execute:`,
+   even when the agent was launched from `main`;
+3. the launch worktree, whatever branch it has checked out.
+
+Before the first tracked-file mutation, validate the target:
 
 ```sh
-faur worktree context --json
-faur worktree add <slug> --task --unique --json
+faur worktree context --json          # launch worktree
+faur worktree context <name> --json   # named or execute task worktree
 ```
 
-Context validates the current branch and canonical location. Add chooses a free
-lowercase kebab-case slug, creates from the launch branch, and stores an immutable
-task ID and launch destination. Use the returned worktree path for every later
-command, edit, test, and commit. Relay failures and preserve partial state.
-Do not reimplement branch creation, setup, fetch, collision handling, or path
-resolution. Old tools lacking the versioned contract must be updated separately;
-do not silently install a release during this task.
+Use the returned canonical path for every later command, edit, test, and
+commit. If context fails, or the target is detached, mid-rebase/merge, or
+otherwise ambiguous, stop and warn instead of choosing another location. Relay
+failures and preserve partial state. Old tools lacking the versioned contract
+must be updated separately; do not silently install a release during this task.
 
-For `execute:`, the task-workflow skill's start/begin/complete runner owns these
-calls and its external plan/state mutations. Do not create a second worktree
-before calling start. Keep one task worktree per request, including when the
-agent was launched from another existing task worktree.
-
-Read-only work, plain repositories, and an explicit instruction to work "here"
-or in a named existing worktree are exceptions. Validate an explicitly reused
-faur worktree with `context <name> --json`; never infer authorization from launch
-location. Plain Git work proceeds in place. Leave shared mutable `_shared/`
-symlinks alone unless the request concerns them. Scratch data stays outside the
-workspace; task plans stay in the external canonical `_plans/` directory.
+Read-only work needs no validation. Plain Git repositories work in place.
+Leave shared mutable `_shared/` symlinks alone unless the request concerns
+them. Scratch data stays outside the workspace; task plans stay in the
+external canonical `_plans/` directory.
 
 ## Complete without integration
 
-Commit and verify in the task worktree. Refresh its context and report actual
-path, branch, clean/dirty state, and commits. For execute runs, use the runner's
-audit/report; ordinary changes use faur context and Git read-only checks.
+Commit and verify in the contextual worktree. Refresh its context and report
+actual path, branch, clean/dirty state, and commits. For execute runs, use the
+runner's audit/report; ordinary changes use faur context and Git read-only checks.
 Stop. Never push, open a PR, integrate, remove a worktree, or delete branches
 without the corresponding explicit request. A PR invokes the pr-workflow skill.
 
 ## Exact finish authorization
 
-Only a later message exactly `finish` or `finish in <branch>` authorizes finish.
-It also authorizes tearing down the task's repository previews. Use the task
-name returned by creation and run the bundled wrapper, resolved by absolute
+Only a later message exactly `finish` or `finish in <branch>` authorizes finish
+of an `execute:` task worktree. It also authorizes tearing down the task's
+repository previews. Use the task name recorded by execute and run the bundled wrapper, resolved by absolute
 path from this skill directory, from any worktree of the workspace:
 
 ```sh

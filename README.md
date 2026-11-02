@@ -9,7 +9,7 @@ Skills here:
 | Skill | Trigger |
 | --- | --- |
 | `agent-baseline` | always on: succinct replies, robust typed Python, commit style |
-| `worktree-workflow` | isolate changes in a [faur-git](https://github.com/faur-ai/faur-git) task worktree, then explicitly `finish` them into an integration worktree after tearing down its previews |
+| `worktree-workflow` | work in place on the contextual [faur-git](https://github.com/faur-ai/faur-git) branch; `execute:` task worktrees are explicitly `finish`ed into an integration worktree after tearing down their previews |
 | `task-workflow` | a message containing the exact keyword `plan:`, `execute:`, or `run:` |
 
 ## Install
@@ -178,10 +178,11 @@ commands, harness capability checks, interruption recovery, and an optional
 real-Claude smoke procedure. Deterministic tests exercise the protocol and
 artifact handoff; the real-Claude smoke was not run during this implementation.
 
-Faur must support schema version 1 context and strict task creation. Ordinary
-changes call `faur worktree context --json` then
-`faur worktree add <slug> --task --unique --json`; execute's runner makes these
-calls itself. Faur owns identity, collision handling, setup, and stored finish
+Faur must support schema version 1 context and strict task creation. Only
+`execute:` creates a task worktree; its runner makes the faur calls itself.
+Ordinary changes validate `faur worktree context --json` and work in place on
+the contextual branch: the latest `execute:` task worktree in the
+conversation, else the launch worktree. Faur owns identity, collision handling, setup, and stored finish
 destinations. Explicitly requested finish and PR commands remain separate.
 To use an unpublished companion CLI, supply a JSON argv prefix to startup:
 
