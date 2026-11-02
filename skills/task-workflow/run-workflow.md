@@ -1,7 +1,7 @@
 # `run:` Mode
 
-`run:` previews a plan's recorded task worktree through a repository-owned
-lifecycle adapter. Skills stay generic: they hold no product names, endpoints,
+`run:` previews a plan's recorded task worktree, or any worktree or branch,
+through a repository-owned lifecycle adapter. Skills stay generic: they hold no product names, endpoints,
 credentials, database choices, sample paths, or application commands. The
 repository's executables own dependencies, ports, configuration, data,
 subprocesses, and cleanup. `scripts/preview_protocol.py` implements the
@@ -9,26 +9,51 @@ contract below with standard-library code only.
 
 ## Commands
 
-`run: <plan-slug>` previews that plan's recorded task worktree. A bare `run:`
-is valid only together with exactly one `execute: <plan-slug>` in the same
-request and uses that slug. Reject a missing, invalid, conflicting, or
-ambiguous slug; never derive one from a branch or worktree name, and never
-create another worktree for a run request. Resolve `scripts/preview.py` by
-absolute path from this skill directory and run it from any worktree of the
-repository; it resolves the task from recorded execution facts and validates
-them through faur version-1 context:
+`run: <name>` passes `<name>` verbatim to the helper, which resolves it in
+this order and reports the choice as `source`:
+
+1. `plan` — an executed plan `<name>` (one with an execution journal): its
+   recorded task worktree. An incomplete execution is refused; resume it.
+2. `worktree` — the one existing worktree whose faur name or branch is
+   `<name>`, such as an impromptu task worktree created without a plan.
+   Several matches are refused as ambiguous.
+3. `created-worktree` — `run` only, faur workspaces only: an existing local
+   or `origin/` branch `<name>` with no worktree is checked out through
+   `faur worktree add <name> --json` (origin is fetched once when the branch
+   is unknown locally). Plain repositories refuse with a checkout hint.
+
+Anything else is refused; a plan with no journal and no matching worktree or
+branch must be executed first. The helper never creates a branch, and
+`status`, `logs`, `stop`, and `reset` never create a worktree.
+
+A bare `run:` together with exactly one `execute: <plan-slug>` in the same
+request uses that slug (see below). A bare `run:` alone previews the worktree
+containing the helper's working directory: run it from this conversation's
+task worktree when one exists, else from the launch worktree. Never guess a
+name from conversation context; a conflicting or ambiguous name is rejected.
+
+Resolve `scripts/preview.py` by absolute path from this skill directory and
+run it from any worktree of the repository; faur version-1 context validates
+every resolved worktree:
 
 ```sh
-python3 <task-workflow-dir>/scripts/preview.py run <slug> [-- <start options>]
-python3 <task-workflow-dir>/scripts/preview.py status <slug>
-python3 <task-workflow-dir>/scripts/preview.py logs <slug> [--lines N] [--follow]
-python3 <task-workflow-dir>/scripts/preview.py stop <slug> [--teardown]
-python3 <task-workflow-dir>/scripts/preview.py reset <slug> [-- <start options>]
+python3 <task-workflow-dir>/scripts/preview.py run [<name>] [-- <start options>]
+python3 <task-workflow-dir>/scripts/preview.py status [<name>]
+python3 <task-workflow-dir>/scripts/preview.py logs [<name>] [--lines N] [--follow]
+python3 <task-workflow-dir>/scripts/preview.py stop [<name>] [--teardown]
+python3 <task-workflow-dir>/scripts/preview.py reset [<name>] [-- <start options>]
 ```
 
+Use the same `<name>` for later operations on one preview. The hostname label
+is the name itself when it is kebab-case, otherwise a kebab-case derivation
+(`feature/Login` becomes `feature-login.localhost`). The task ID is faur's
+immutable task ID when the worktree has a task record, otherwise one derived
+from the worktree identity. A created or non-task worktree has no faur finish
+path that tears previews down: run `stop --teardown` before removing it, and
+report the created worktree's path to the user.
+
 A standalone run previews the worktree as-is, including uncommitted edits; it
-never commits, stages, or changes plan checkboxes. A plan without a recorded
-task worktree is refused: execute it first. Repeating `run` reuses a running,
+never commits, stages, or changes plan checkboxes. Repeating `run` reuses a running,
 ready runtime; a stopped runtime restarts with its retained data. Changing
 start options requires `reset` or `stop` first. Start options after `--` must
 match the repository protocol and travel as argv, never through a shell.

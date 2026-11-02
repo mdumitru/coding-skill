@@ -1,6 +1,6 @@
 ---
 name: task-workflow
-description: Use only when the user's message contains the exact keyword `plan:`, `execute:`, or `run:`, including the trailing colon. Create or execute a validated shared task plan, or start/stop the repository preview of a plan's recorded task worktree; do not trigger for ordinary planning, implementation, or run requests without one of these exact keywords.
+description: Use only when the user's message contains the exact keyword `plan:`, `execute:`, or `run:`, including the trailing colon. Create or execute a validated shared task plan, or start/stop the repository preview of a plan's task worktree, another worktree, or a branch; do not trigger for ordinary planning, implementation, or run requests without one of these exact keywords.
 ---
 
 # Task Workflow
@@ -26,4 +26,5 @@ plain repository or a faur-git workspace and rejects path or symlink escapes.
 For example, `plan: improve-routing` and `execute: improve-routing` both refer
 to `_plans/improve-routing.md`.
 `run: improve-routing` previews that plan's recorded task worktree at
-`improve-routing.localhost`.
+`improve-routing.localhost`; `run:` also accepts a worktree or branch name when
+no executed plan has that name (see `run-workflow.md`).

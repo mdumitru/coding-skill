@@ -3,9 +3,12 @@
 Baseline working conventions (succinct replies, robust Python, commit style)
 are in the always-on `agent-baseline` skill. The exact `plan:`, `execute:`,
 and `run:` keywords (including their trailing colons) trigger the matching mode
-of the `task-workflow` skill. `run: <slug>` previews that plan's recorded task
-worktree at exactly `<slug>.localhost`; a bare `run:` is valid only beside one
-`execute: <slug>`, and then starts the preview after the execution is audited.
+of the `task-workflow` skill. `run: <name>` previews, at `<slug>.localhost`
+(the name in kebab-case), an executed plan's task worktree, else the worktree
+or branch named `<name>`, checking out an existing branch in a new faur
+worktree when needed. A bare `run:` beside one
+`execute: <slug>` starts the preview after the execution is audited; otherwise
+it previews this conversation's task worktree, else the launch worktree.
 Source repo: `~/gits/coding-skill`.
 
 ## Worktrees
@@ -41,8 +44,9 @@ skill: its wrapper runs faur's dry-run, tears down the task's repository
 previews, and only then runs `faur worktree finish`. A teardown failure blocks
 finish and keeps the worktree. Faur uses its recorded launch destination and
 verifies integration before removing the worktree and deleting its local task
-branch; it leaves remote branches untouched. A run request never creates a
-worktree, commits, or authorizes finish or a PR.
+branch; it leaves remote branches untouched. A run request creates at most a
+worktree for an existing branch; it never creates a branch, commits, or
+authorizes finish or a PR.
 
 At any point, warn me clearly about conflicts, failures, ambiguous state, or
 anything else that did not go smoothly or requires my attention.

@@ -202,8 +202,12 @@ explicitly from agent-baseline's helper; it does not install repository hooks.
 exactly `example.localhost`, even when faur named the worktree `example-2`.
 `execute: example` with a bare `run:` records the preview intent first and
 starts the preview only after the execution's final audit; retries reuse it.
-A run never creates a worktree, commits, or changes plan checkboxes, so it can
-preview uncommitted edits.
+Without an executed plan of that name, `run: <name>` previews the worktree
+whose faur name or branch is `<name>` (for example an impromptu task
+worktree), or checks out an existing local/origin branch in a new faur
+worktree; the hostname is the name in kebab-case. A bare `run:` alone previews
+the current worktree. A run never creates a branch, commits, or changes plan
+checkboxes, so it can preview uncommitted edits.
 
 A repository opts in with real executables in `worktree-tools/`: `start`,
 `status`, `logs`, `stop`, and `reset` plus `worktree-tools/protocol.json`

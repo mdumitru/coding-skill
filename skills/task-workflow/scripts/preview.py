@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Run, inspect, stop, and reset a plan's repository preview from recorded execution identity.
+"""Run, inspect, stop, and reset the repository preview of a plan, worktree, or branch.
 
-The task worktree always comes from the plan's execution state and faur context;
-this helper never creates a worktree, commits, or changes plan checkboxes.
+A name resolves, in order, to an executed plan's recorded task worktree, an
+existing worktree (by faur name or branch), or — for `run` in a faur workspace
+only — a new faur worktree checking out an existing local or origin branch.
+This helper never commits, creates branches, or changes plan checkboxes.
 """
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -22,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import preview_protocol as pp
 import workflow
-from plan_file import GitContext, PlanFileError, git_output, resolve_plan
+from plan_file import GitContext, PlanFileError, git_context, git_output, json_strings, resolve_plan
 from state_io import StateError, atomic_write, plan_lock
 
 LOGGER = logging.getLogger('preview')
@@ -30,15 +33,19 @@ DEFAULT_TIMEOUT = 600.0
 MAX_LOG_LINES = 10000
 MAX_LOG_BYTES = 256 * 1024
 INTENT_PHASES = frozenset({'pending', 'starting', 'discharged'})
+DEFAULT_FAUR = ['faur', 'worktree']
+MAX_LABEL = 63
+UNSAFE_NAME = re.compile(r'[\x00-\x20\x7f]')
 
 
 @dataclass(frozen=True)
 class Target:
-    plan: Path
+    plan: Path | None
     context: GitContext
     identity: pp.RuntimeIdentity
     task_root: Path
     paths: pp.RuntimePaths
+    source: str = 'plan'  # plan | worktree | created-worktree
 
 
 @dataclass(frozen=True)
@@ -52,24 +59,43 @@ class Invocation:
 # ----------------------------------------------------------------- pure rules
 
 
-def resolve_run_slug(run_slug: str | None, execute_slugs: list[str]) -> str:
-    """Explicit run slug, or the single execute slug of a combined request; never a guess."""
+def check_target_name(name: str) -> str:
+    """A plan slug, worktree name, or branch name; resolution decides which."""
+    if not name or name.startswith('-') or UNSAFE_NAME.search(name) or name.endswith('.md'):
+        raise StateError(f'invalid run target name: {name!r}')
+    return name
+
+
+def resolve_run_slug(run_slug: str | None, execute_slugs: list[str]) -> str | None:
+    """Explicit target name, the single execute slug of a combined request, or None for the current worktree."""
     if len(set(execute_slugs)) > 1:
         raise StateError(f'ambiguous combined request: multiple execute slugs {sorted(set(execute_slugs))}')
-    if run_slug is not None:
-        if execute_slugs and execute_slugs[0] != run_slug:
+    if execute_slugs:
+        pp.hostname_for(execute_slugs[0])
+        if run_slug is not None and execute_slugs[0] != run_slug:
             raise StateError(f'run slug {run_slug!r} conflicts with execute slug {execute_slugs[0]!r}')
-        pp.hostname_for(run_slug)
-        return run_slug
-    if not execute_slugs:
-        raise StateError('run: requires a plan slug, or exactly one execute: slug in the same request')
-    pp.hostname_for(execute_slugs[0])
-    return execute_slugs[0]
+        return execute_slugs[0]
+    return None if run_slug is None else check_target_name(run_slug)
 
 
-def plain_task_id(common_dir: str, worktree: str) -> str:
-    """Plain repositories lack a faur task ID; derive a stable one from recorded identity."""
-    return 'plain-' + hashlib.sha256(f'{common_dir}\0{worktree}'.encode()).hexdigest()[:24]
+def host_label(name: str) -> str:
+    """Kebab-case DNS label for <label>.localhost; plan slugs and kebab names map to themselves."""
+    if pp.SLUG_RE.fullmatch(name) and len(name) <= MAX_LABEL:
+        return name
+    label = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+    if not label:
+        raise StateError(f'cannot derive a preview hostname from {name!r}')
+    if not label[0].isalpha():
+        label = f'b-{label}'
+    if len(label) > MAX_LABEL:
+        label = label[:MAX_LABEL - 9].rstrip('-') + '-' + hashlib.sha256(name.encode()).hexdigest()[:8]
+    pp.hostname_for(label)
+    return label
+
+
+def plain_task_id(common_dir: str, worktree: str, prefix: str = 'plain') -> str:
+    """Worktrees without a faur task record get a stable ID derived from their identity."""
+    return f'{prefix}-' + hashlib.sha256(f'{common_dir}\0{worktree}'.encode()).hexdigest()[:24]
 
 
 def check_intent(data: object, slug: str) -> dict[str, object]:
@@ -130,21 +156,143 @@ def ensure_plain_ignored(root: Path) -> None:
     LOGGER.info('added /%s/ to %s', pp.PLAIN_RUNS, exclude)
 
 
-def resolve_target(slug: str) -> Target:
-    """Resolve only the recorded, faur-validated task worktree of an executed plan."""
+def build_target(context: GitContext, label: str, task_id: str, task_root: Path, *, plan: Path | None, source: str) -> Target:
+    if not context.is_faur:
+        ensure_plain_ignored(task_root)
+    base = context.plan_root.parent if context.is_faur else task_root
+    identity = pp.make_identity(label, task_id, str(task_root), str(context.common_dir))
+    return Target(plan, context, identity, task_root, pp.runtime_paths(base, label, faur=context.is_faur), source)
+
+
+def plan_target(slug: str) -> Target:
+    """The recorded, faur-validated task worktree of an executed plan."""
     path, context = resolve_plan(slug)
     if not workflow.state_path(path).exists():
-        raise StateError(f'plan {slug} has no recorded task worktree; run execute: {slug} first (run never creates a worktree)')
+        raise StateError(f'plan {slug} has no recorded task worktree; run execute: {slug} first')
     state = workflow.load(path)
     if state.identity is None or state.phase not in {'ready', 'revising'}:
         raise StateError(f'plan {slug} execution startup is incomplete ({state.phase}); resume execute: {slug} first')
     task_root = workflow.check_identity(state, context, require_cwd=False)
     task_id = state.identity.task_id or plain_task_id(state.common_dir, str(task_root))
+    return build_target(context, slug, task_id, task_root, plan=path, source='plan')
+
+
+def executed_plan(name: str, context: GitContext) -> bool:
+    """True when <name> is a plan with an execution journal; a journal-less plan falls through."""
+    if not pp.SLUG_RE.fullmatch(name) or not (context.plan_root / f'{name}.md').is_file():
+        return False
+    path, _ = resolve_plan(name)
+    return workflow.state_path(path).exists()
+
+
+def listed_worktrees(cwd: Path) -> list[tuple[Path, str | None]]:
+    """(path, branch) for every non-bare Git worktree; detached ones carry no branch."""
+    entries: list[tuple[Path, str | None]] = []
+    path: Path | None = None
+    branch: str | None = None
+    bare = False
+    for line in [*git_output(cwd, 'worktree', 'list', '--porcelain').splitlines(), '']:
+        if line.startswith('worktree '):
+            path, branch, bare = Path(line.removeprefix('worktree ')).resolve(), None, False
+        elif line.startswith('branch refs/heads/'):
+            branch = line.removeprefix('branch refs/heads/')
+        elif line == 'bare':
+            bare = True
+        elif not line and path is not None:
+            if not bare:
+                entries.append((path, branch))
+            path = None
+    return entries
+
+
+def find_worktree(name: str, context: GitContext) -> Path | None:
+    """The single worktree whose faur name (workspace-relative path) or branch equals <name>."""
+    root = context.plan_root.parent
+    matches = {path for path, branch in listed_worktrees(Path.cwd())
+               if branch == name or (context.is_faur and path.is_relative_to(root) and path.relative_to(root).as_posix() == name)}
+    if len(matches) > 1:
+        raise StateError(f'ambiguous run target {name!r}: matches worktrees {sorted(map(str, matches))}')
+    return matches.pop() if matches else None
+
+
+def branch_ref(cwd: Path, name: str) -> str | None:
+    for ref in (f'refs/heads/{name}', f'refs/remotes/origin/{name}'):
+        if subprocess.run(['git', 'show-ref', '--verify', '--quiet', ref], cwd=cwd, capture_output=True).returncode == 0:
+            return ref
+    return None
+
+
+def existing_branch(cwd: Path, name: str) -> str | None:
+    """Local or origin branch <name>, fetching origin once when it is not known locally."""
+    if subprocess.run(['git', 'check-ref-format', '--branch', name], cwd=cwd, capture_output=True).returncode:
+        return None
+    ref = branch_ref(cwd, name)
+    if ref is None and subprocess.run(['git', 'remote', 'get-url', 'origin'], cwd=cwd, capture_output=True).returncode == 0:
+        fetched = subprocess.run(['git', 'fetch', '--quiet', '--prune', 'origin'], cwd=cwd, capture_output=True, text=True)
+        if fetched.returncode:
+            LOGGER.warning('git fetch origin failed: %s', pp.bounded(fetched.stderr.strip()))
+        ref = branch_ref(cwd, name)
+    return ref
+
+
+def create_worktree(name: str, context: GitContext, runner: list[str]) -> Path:
+    """Check out an existing branch in a new faur worktree; never create a branch."""
+    cwd = Path.cwd()
+    if existing_branch(cwd, name) is None:
+        raise StateError(f'no executed plan, worktree, or local/origin branch named {name!r}')
     if not context.is_faur:
-        ensure_plain_ignored(task_root)
-    base = context.plan_root.parent if context.is_faur else task_root
-    identity = pp.make_identity(slug, task_id, str(task_root), str(context.common_dir))
-    return Target(path, context, identity, task_root, pp.runtime_paths(base, slug, faur=context.is_faur))
+        raise StateError(f'branch {name} has no worktree; in a plain repository check it out first (git worktree add <path> {name})')
+    data = workflow.run_faur(runner, cwd, 'add', name, '--json')
+    worktree = workflow.object_value(data.get('worktree'), 'created worktree')
+    if data.get('dry_run') is not False or worktree.get('branch') != name:
+        raise StateError(f'faur add returned an unexpected worktree for {name}: {worktree}')
+    path = Path(workflow.string_value(worktree.get('path'), 'worktree.path'))
+    LOGGER.info('created worktree %s for branch %s', path, name)
+    return path
+
+
+def worktree_target(path: Path, label: str, context: GitContext, runner: list[str], *, source: str) -> Target:
+    """Preview an existing worktree as-is, validated through faur context when available."""
+    if context.is_faur:
+        identity = workflow.context_identity(workflow.run_faur(runner, path, 'context', '--json'), str(context.common_dir))
+    else:
+        identity = workflow.plain_identity(context, path)
+    task_root = Path(identity.path)
+    if task_root != path.resolve():
+        raise StateError(f'worktree identity mismatch: expected {path}, faur reports {task_root}')
+    task_id = identity.task_id or plain_task_id(str(context.common_dir), str(task_root), 'worktree' if context.is_faur else 'plain')
+    return build_target(context, label, task_id, task_root, plan=None, source=source)
+
+
+def current_target(context: GitContext, runner: list[str]) -> Target:
+    """The worktree containing the current directory, named by its faur name or branch."""
+    path = Path(git_output(Path.cwd(), 'rev-parse', '--show-toplevel')).resolve()
+    root = context.plan_root.parent
+    name = path.relative_to(root).as_posix() if context.is_faur and path.is_relative_to(root) else git_output(path, 'symbolic-ref', '--quiet', '--short', 'HEAD')
+    return worktree_target(path, host_label(name), context, runner, source='worktree')
+
+
+def resolve_target(name: str | None, *, create: bool = False, plan_only: bool = False, runner: list[str] | None = None) -> Target:
+    """Executed plan, then existing worktree, then (run only) a new worktree for an existing branch."""
+    runner = runner or DEFAULT_FAUR
+    context = git_context()
+    if name is None:
+        return current_target(context, runner)
+    check_target_name(name)
+    if plan_only or executed_plan(name, context):
+        return plan_target(name)
+    path = find_worktree(name, context)
+    if path is not None:
+        return worktree_target(path, host_label(name), context, runner, source='worktree')
+    unexecuted = f'; plan {name} exists but is not executed: execute: {name} first' if pp.SLUG_RE.fullmatch(name) and (context.plan_root / f'{name}.md').is_file() else ''
+    if not create:
+        hint = ' (run creates one for an existing branch)' if context.is_faur and existing_branch(Path.cwd(), name) else ''
+        raise StateError(f'no executed plan or worktree named {name!r}{hint}{unexecuted}')
+    try:
+        path = create_worktree(name, context, runner)
+    except StateError as exc:
+        raise StateError(f'{exc}{unexecuted}') from exc
+    return worktree_target(path, host_label(name), context, runner, source='created-worktree')
 
 
 def invoke(target: Target, operation: str, *extra: str, timeout: float, machine: bool = True) -> Invocation:
@@ -182,7 +330,7 @@ def report(target: Target, operation: str, response: pp.Response | None, duratio
             'worktree': target.identity.worktree, 'runtime_id': target.identity.runtime_id, 'phase': phase,
             'status': response.status if response else 'absent', 'ready': bool(response and response.ready),
             'readiness': response.readiness_detail if response else '', 'services': [asdict(s) for s in response.services] if response else [],
-            'details': response.details if response else {}, 'record': str(target.paths.record),
+            'details': response.details if response else {}, 'record': str(target.paths.record), 'source': target.source,
             'duration_seconds': round(duration, 3), 'note': note}
 
 
@@ -340,14 +488,17 @@ def working_directory(path: Path) -> Iterator[None]:
         os.chdir(previous)
 
 
-def run(run_slug: str | None, execute_slugs: list[str], start_args: list[str], *, timeout: float = DEFAULT_TIMEOUT) -> dict[str, object]:
-    """Standalone run previews the recorded worktree as-is; combined run requires an audited execution."""
+def run(run_slug: str | None, execute_slugs: list[str], start_args: list[str], *, timeout: float = DEFAULT_TIMEOUT,
+        runner: list[str] | None = None) -> dict[str, object]:
+    """Standalone run previews the resolved worktree as-is; combined run requires an audited execution."""
     slug = resolve_run_slug(run_slug, execute_slugs)
     if not execute_slugs:
-        return start_runtime(resolve_target(slug), start_args, timeout=timeout)
+        return start_runtime(resolve_target(slug, create=True, runner=runner), start_args, timeout=timeout)
+    assert slug is not None
     intent = record_intent(slug, start_args)
     args = list(intent['start_args'])  # type: ignore[arg-type]
-    target = resolve_target(slug)
+    target = resolve_target(slug, plan_only=True)
+    assert target.plan is not None
     from completion import audit
     with working_directory(target.task_root):
         audit(slug)
@@ -377,15 +528,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, epilog='Repository start options follow a literal --.')
     parser.add_argument('-v', '--verbose', action='store_true')
     sub = parser.add_subparsers(dest='operation', required=True)
-    run_parser = sub.add_parser('run', help='start or reuse the preview')
-    run_parser.add_argument('slug', nargs='?')
+    run_parser = sub.add_parser('run', help='start or reuse the preview; may create a worktree for an existing branch')
+    run_parser.add_argument('slug', nargs='?', help='plan slug, worktree name, or branch (default: current worktree)')
     run_parser.add_argument('--execute-slug', action='append', default=[], help='slug from the same request\'s execute:')
     intent = sub.add_parser('intent', help='record a combined execute/run request before execution')
     intent.add_argument('slug', nargs='?')
     intent.add_argument('--execute-slug', action='append', default=[], required=True)
     for name in ('status', 'logs', 'stop', 'reset'):
         p = sub.add_parser(name)
-        p.add_argument('slug')
+        p.add_argument('slug', nargs='?', help='plan slug, worktree name, or branch (default: current worktree)')
         if name == 'logs':
             p.add_argument('--lines', type=int, default=200)
             p.add_argument('--follow', action='store_true', help='stream until interrupted')
@@ -393,6 +544,7 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument('--teardown', action='store_true', help='delete every owned resource')
     for p in (run_parser, *[sub.choices[n] for n in ('status', 'logs', 'stop', 'reset')]):
         p.add_argument('--timeout', type=float, default=DEFAULT_TIMEOUT, help='seconds per adapter call')
+        p.add_argument('--faur-argv', default=json.dumps(DEFAULT_FAUR), help='JSON executable argv prefix')
     return parser
 
 
@@ -407,18 +559,22 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if start_args is not None and args.operation not in {'run', 'intent', 'reset'}:
             raise StateError(f'{args.operation} does not accept start options')
+        if args.operation == 'intent':
+            slug = resolve_run_slug(args.slug, args.execute_slug)
+            assert slug is not None
+            print(json.dumps(record_intent(slug, start_args or []), sort_keys=True))
+            return 0
+        runner = json_strings(args.faur_argv, 'faur argv')
         if args.operation == 'logs':
-            return logs_runtime(resolve_target(args.slug), lines=args.lines, follow=args.follow, timeout=args.timeout)
+            return logs_runtime(resolve_target(args.slug, runner=runner), lines=args.lines, follow=args.follow, timeout=args.timeout)
         if args.operation == 'run':
-            result: dict[str, object] = run(args.slug, args.execute_slug, start_args or [], timeout=args.timeout)
-        elif args.operation == 'intent':
-            result = record_intent(resolve_run_slug(args.slug, args.execute_slug), start_args or [])
+            result: dict[str, object] = run(args.slug, args.execute_slug, start_args or [], timeout=args.timeout, runner=runner)
         elif args.operation == 'status':
-            result = status_runtime(resolve_target(args.slug), timeout=args.timeout)
+            result = status_runtime(resolve_target(args.slug, runner=runner), timeout=args.timeout)
         elif args.operation == 'stop':
-            result = stop_runtime(resolve_target(args.slug), teardown=args.teardown, timeout=args.timeout)
+            result = stop_runtime(resolve_target(args.slug, runner=runner), teardown=args.teardown, timeout=args.timeout)
         else:
-            result = reset_runtime(resolve_target(args.slug), start_args, timeout=args.timeout)
+            result = reset_runtime(resolve_target(args.slug, runner=runner), start_args, timeout=args.timeout)
         print(json.dumps(result, sort_keys=True))
         return 0
     except (PlanFileError, StateError, OSError, ValueError, subprocess.CalledProcessError) as exc:

@@ -147,12 +147,26 @@ class PreviewTestCase(unittest.TestCase):
 class PureRuleTests(unittest.TestCase):
     def test_slug_resolution(self) -> None:
         self.assertEqual(preview.resolve_run_slug('example', []), 'example')
+        self.assertEqual(preview.resolve_run_slug('feature/Login', []), 'feature/Login')
+        self.assertIsNone(preview.resolve_run_slug(None, []))
         self.assertEqual(preview.resolve_run_slug(None, ['example']), 'example')
         self.assertEqual(preview.resolve_run_slug('example', ['example', 'example']), 'example')
-        for run_slug, execute, message in ((None, [], 'requires a plan slug'), (None, ['a', 'b'], 'multiple'),
-                                           ('a', ['b'], 'conflicts'), ('Bad', [], 'invalid'), (None, ['x.md'], 'invalid')):
+        for run_slug, execute, message in ((None, ['a', 'b'], 'multiple'), ('a', ['b'], 'conflicts'), ('-x', [], 'invalid'),
+                                           ('a b', [], 'invalid'), ('x.md', [], 'invalid'), (None, ['Bad'], 'invalid'),
+                                           (None, ['x.md'], 'invalid')):
             with self.subTest(run=run_slug, execute=execute), self.assertRaisesRegex(StateError, message):
                 preview.resolve_run_slug(run_slug, execute)
+
+    def test_host_label(self) -> None:
+        self.assertEqual(preview.host_label('example-2'), 'example-2')
+        self.assertEqual(preview.host_label('feature/Login_Page'), 'feature-login-page')
+        self.assertEqual(preview.host_label('123-fix'), 'b-123-fix')
+        long = preview.host_label('x' * 100)
+        self.assertLessEqual(len(long), 63)
+        self.assertRegex(long, pp.SLUG_RE)
+        self.assertNotEqual(long, preview.host_label('x' * 101))
+        with self.assertRaisesRegex(StateError, 'cannot derive'):
+            preview.host_label('///')
 
     def test_plain_task_id_is_stable(self) -> None:
         self.assertEqual(preview.plain_task_id('/c', '/w'), preview.plain_task_id('/c', '/w'))
@@ -174,10 +188,46 @@ class PlainPreviewTests(PreviewTestCase):
     def state_dir(self) -> Path:
         return self.repo / '.worktree-runs/example/state'
 
-    def test_run_requires_recorded_execution_and_never_creates_worktree(self) -> None:
+    def test_unexecuted_plan_without_worktree_is_refused(self) -> None:
         with working_directory(self.repo), self.assertRaisesRegex(StateError, 'execute: example first'):
             preview.run('example', [], [])
         self.assertFalse((self.repo / '.worktree-runs').exists())
+        self.assertEqual(len(preview.listed_worktrees(self.repo)), 1)
+
+    def test_impromptu_worktree_branch_and_current_worktree(self) -> None:
+        impromptu = self.root / 'impromptu'
+        run_git('worktree', 'add', '-qb', 'feature/Quick', str(impromptu), cwd=self.repo)
+        (impromptu / 'app.txt').write_text('impromptu edit\n')
+        with working_directory(self.repo):
+            result = preview.run('feature/Quick', [], [])
+            self.assertEqual((result['source'], result['hostname'], result['worktree']), ('worktree', 'feature-quick.localhost', str(impromptu)))
+            self.assertEqual(result['details']['source'], 'impromptu edit\n')
+            self.assertTrue(result['task_id'].startswith('plain-'))
+            self.assertEqual(preview.status_runtime(preview.resolve_target('feature/Quick'), timeout=30)['status'], 'running')
+        self.assertTrue((impromptu / '.worktree-runs/feature-quick/runtime.json').is_file())
+        self.assertEqual(workflow.git_output(impromptu, 'status', '--porcelain'), 'M app.txt')
+        with working_directory(impromptu / pp.TOOLS_DIR):
+            again = preview.run(None, [], [])
+        self.assertEqual((again['note'], again['runtime_id']), ('reused running preview', result['runtime_id']))
+        branch = workflow.git_output(self.repo, 'symbolic-ref', '--short', 'HEAD')
+        with working_directory(self.repo):
+            current = preview.run(None, [], [])
+        self.assertEqual((current['worktree'], current['plan_slug']), (str(self.repo), preview.host_label(branch)))
+
+    def test_unexecuted_plan_previews_matching_worktree(self) -> None:
+        run_git('worktree', 'add', '-qb', 'example', str(self.root / 'example-wt'), cwd=self.repo)
+        with working_directory(self.repo):
+            result = preview.run('example', [], [])
+        self.assertEqual((result['source'], result['worktree']), ('worktree', str(self.root / 'example-wt')))
+
+    def test_plain_branch_without_worktree_is_not_created(self) -> None:
+        run_git('branch', 'lonely', cwd=self.repo)
+        with working_directory(self.repo):
+            with self.assertRaisesRegex(StateError, 'git worktree add <path> lonely'):
+                preview.run('lonely', [], [])
+            with self.assertRaisesRegex(StateError, 'no executed plan, worktree, or local/origin branch'):
+                preview.run('missing', [], [])
+        self.assertEqual(len(preview.listed_worktrees(self.repo)), 1)
 
     def test_standalone_run_preserves_dirty_source_and_plan(self) -> None:
         self.start_execution()
@@ -394,6 +444,77 @@ class FaurPreviewTests(PreviewTestCase):
         self.created['task'] = {**self.created['task'], 'task_id': 'someone-else'}
         with working_directory(self.launch), self.assertRaisesRegex(StateError, 'identity changed'):
             preview.run('example', [], [])
+        self.assertFalse((self.workspace / '_runs').exists())
+
+
+
+class FaurAdHocPreviewTests(PreviewTestCase):
+    """Worktrees and branches without plans, validated through a fake faur."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.workspace, self.launch = RepositoryFixture(self.root).faur()
+        run_git('config', 'user.name', 'Preview Tests', cwd=self.launch)
+        run_git('config', 'user.email', 'test@example.invalid', cwd=self.launch)
+        (self.launch / '.gitignore').write_text('__pycache__/\n')
+        install_tools(self.launch)
+        run_git('add', '.', cwd=self.launch)
+        run_git('commit', '-qm', 'add preview tools', cwd=self.launch)
+        run_git('remote', 'remove', 'origin', cwd=self.launch)
+        self.common = str(self.workspace / '.bare')
+        self.tasks: dict[str, str] = {}
+        self.calls: list[tuple[str, ...]] = []
+        self.faur = patch('workflow.run_faur', side_effect=self.fake_faur)
+        self.faur.start()
+
+    def tearDown(self) -> None:
+        self.faur.stop()
+        super().tearDown()
+
+    def fake_faur(self, runner: list[str], cwd: Path, *args: str) -> dict[str, object]:
+        self.calls.append(args)
+        if args[0] == 'add':
+            path = self.workspace / args[1]
+            run_git('worktree', 'add', '-q', str(path), args[1], cwd=self.launch)
+            return {'schema_version': 1, 'command': 'add', 'ok': True, 'dry_run': False, 'task_id': None, 'task': None,
+                    'worktree': {'name': args[1], 'path': str(path), 'branch': args[1], 'head': None}}
+        root = Path(workflow.git_output(cwd, 'rev-parse', '--show-toplevel')).resolve()
+        name = root.relative_to(self.workspace).as_posix()
+        task_id = self.tasks.get(name)
+        task = {'status': 'valid', 'record': {'task_id': task_id}} if task_id else {'status': 'none', 'record': None}
+        return {'schema_version': 1, 'command': 'context', 'ok': True, 'workspace': {'common_dir': self.common},
+                'worktree': {'name': name, 'path': str(root), 'branch': workflow.git_output(root, 'symbolic-ref', '--short', 'HEAD')}, 'task': task}
+
+    def test_impromptu_task_worktree_uses_faur_task_id(self) -> None:
+        run_git('worktree', 'add', '-qb', 'quick-fix', str(self.workspace / 'quick-fix'), cwd=self.launch)
+        self.tasks['quick-fix'] = 'impromptu-task-id'
+        with working_directory(self.launch):
+            result = preview.run('quick-fix', [], [])
+        self.assertEqual((result['source'], result['task_id'], result['hostname']), ('worktree', 'impromptu-task-id', 'quick-fix.localhost'))
+        self.assertTrue((self.workspace / '_runs/quick-fix/runtime.json').is_file())
+        self.assertNotIn('add', [c[0] for c in self.calls])
+
+    def test_branch_without_worktree_gets_one_from_faur(self) -> None:
+        run_git('branch', 'feature/Login', cwd=self.launch)
+        with working_directory(self.launch):
+            with self.assertRaisesRegex(StateError, 'run creates one'):
+                preview.status_runtime(preview.resolve_target('feature/Login'), timeout=30)
+            self.assertEqual(self.calls, [])
+            result = preview.run('feature/Login', [], [])
+            created = self.workspace / 'feature/Login'
+            self.assertEqual((result['source'], result['worktree'], result['hostname']), ('created-worktree', str(created), 'feature-login.localhost'))
+            self.assertTrue(result['task_id'].startswith('worktree-'))
+            self.assertEqual(self.calls[0], ('add', 'feature/Login', '--json'))
+            again = preview.run('feature/Login', [], [])
+            self.assertEqual((again['source'], again['note']), ('worktree', 'reused running preview'))
+            self.assertEqual(len([c for c in self.calls if c[0] == 'add']), 1)
+            torn = preview.stop_runtime(preview.resolve_target('feature/Login'), teardown=True, timeout=30)
+            self.assertEqual(torn['phase'], 'torn-down')
+
+    def test_unknown_name_creates_nothing(self) -> None:
+        with working_directory(self.launch), self.assertRaisesRegex(StateError, 'no executed plan, worktree, or local/origin branch'):
+            preview.run('nothing-here', [], [])
+        self.assertEqual(self.calls, [])
         self.assertFalse((self.workspace / '_runs').exists())
 
 
