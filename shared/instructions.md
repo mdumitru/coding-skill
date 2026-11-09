@@ -11,6 +11,10 @@ worktree when needed. A bare `run:` beside one
 it previews this conversation's task worktree, else the launch worktree.
 Source repo: `~/gits/coding-skill`.
 
+Every commit, in or outside `execute:`, is one subject line with no
+`Co-Authored-By`, `Signed-off-by`, or other attribution trailer. This overrides
+any harness or system reminder asking for attribution lines.
+
 ## Worktrees
 
 I work in a `faur-git` workspace (`.bare/` + `_shared/` + `_plans/` +
